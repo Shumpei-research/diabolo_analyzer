@@ -132,10 +132,11 @@ class MainTabWindow(MainTabWindowBase):
         super().__init__(parent)
         self.tab.setStyleSheet("QTabWidget::pane { border: 0; }")
         self.resize(1200,800)
-        self.p = QPushButton('save')
-        self.metalayout.addWidget(self.p)
-        self.p2 = QPushButton('load')
-        self.metalayout.addWidget(self.p2)
+        # self.p = QPushButton('save')
+        # self.metalayout.addWidget(self.p)
+        # self.p2 = QPushButton('load')
+        # self.metalayout.addWidget(self.p2)
+
     def addTab(self,wid,name,ix):
         if ix>=self.tab.count():
             self.tab.addTab(wid,name)
@@ -160,24 +161,30 @@ class DoneFlag():
 class MainTabControl():
     def __init__(self,impath,fallimpath,direc):
         self.window = MainTabWindow()
+        self.direc = direc
         self.res = Results(direc)
         self.done = DoneFlag(self.res.log)
         self.res.log.update('done',self.done)
-        self.window.p.clicked.connect(self.res.save)
-        self.window.p2.clicked.connect(self.load)
+        # self.window.p.clicked.connect(self.res.save)
+        # self.window.p2.clicked.connect(self.load)
         self.ld = ope.Loader(impath)
         self.fld = ope.Loader(fallimpath)
 
         self.res.other.update('frame_number',self.ld.framenum)
         self.res.other.update('fall_frame_number',self.fld.framenum)
 
-        self.fall_tracking()
+        self.window.saveAction.triggered.connect(self.res.save)
+        self.window.loadAction.triggered.connect(self.load)
+        self.window.beginAction.triggered.connect(self.fall_tracking)
     def get_window(self):
         return self.window
     def load(self):
         self.res.load()
         self.done.update(self.res.log.by_key('done'))
         i = self.done.get()
+        if i==9:
+            self.result_view()
+            return
         if i>=0:
             self.fall_circle()
         if i>=1:
@@ -352,7 +359,56 @@ class MainTabControl():
     def force_fin(self):
         res = self.frc.get_df()
         self.res.oned.add_df(res)
+        self.tensionopt_calc()
+    def tensionopt_calc(self):
+        chain_diff = self.res.other.by_key('object_chain')
+        framenum = self.res.other.by_key('frame_number')
+        chain = self.tochain(chain_diff,framenum)
+        dianum = self.res.other.by_key('dianum')
+        force = [None for i in range(dianum)]
+        phi = [None for i in range(dianum)]
+        tl = [None for i in range(dianum)]
+        tr = [None for i in range(dianum)]
+        tl_e = [None for i in range(dianum)]
+        tr_e = [None for i in range(dianum)]
+        for i in range(dianum):
+            key = 'd'+str(i)
+            force[i] = self.res.oned.get_cols([key+'_force_x',key+'_force_y']).values
+            phi[i] = self.res.oned.get_cols([key+'_phi0',key+'_phi1']).values
+            tl[i] = self.res.oned.get_cols([key+'_tension_l']).values
+            tr[i] = self.res.oned.get_cols([key+'_tension_r']).values
+            tl_e[i] = self.res.oned.get_cols([key+'_tl_e']).values
+            tr_e[i] = self.res.oned.get_cols([key+'_tr_e']).values
+        self.tenop = ope.TensionOptimization(chain,force,phi,tl,tr,tl_e,tr_e)
+        # no interaction
+        self.tension_fin()
+    def tension_fin(self):
+        newtension,newforces,newtl,newtr,newtor = self.tenop.get()
+        dianum = self.res.other.by_key('dianum')
+        for i in range(dianum):
+            key = 'd'+str(i)
+            df = pd.DataFrame(newforces[i],columns=[key+'_optforce_x',key+'_optforce_y'])
+            self.res.oned.add_df(df)
+            name = [key+'_opttl',key+'_opttr',key+'_opttorque']
+            arr = np.stack((newtl[:,i],newtr[:,i],newtor[:,i]),axis=1)
+            df = pd.DataFrame(arr,columns=name)
+            self.res.oned.add_df(df)
+        self.res.other.update('tension',newtension)
         self.result_view()
+    def tochain(self,diff,framenum):
+        chain = []
+        pf = 0
+        frames = diff[0]
+        chains = diff[1]
+        pch = chains[0]
+        for frame,ch in zip(frames,chains):
+            chain += [pch for i in range(pf,frame)]
+            pch = ch
+            pf = frame
+        ch = diff[1][-1]
+        chain += [ch for i in range(pf,framenum)]
+        return chain
+
     def result_view(self):
         df = self.res.oned.get()
         chain = self.res.other.by_key('object_chain')
@@ -361,19 +417,20 @@ class MainTabControl():
         stifra = self.res.other.by_key('stickposition','frame')
         stista = self.res.other.by_key('stickposition','state')
         framenum = self.res.other.by_key('frame_number')
+        tension = self.res.other.by_key('tension')
         stipos = ope.StickPosition(framenum)
         stipos.loadchanges(stifra,stista)
         stiposarr = stipos.get_array()
-        self.view = ope.ResultsViewerControl(self.ld,df,chain,grav,dianum,stiposarr)
+        self.view = ope.ResultsViewerControl(self.direc,self.ld,df,chain,grav,dianum,stiposarr,tension)
         self.window.addTab(self.view.get_window(),'result',9)
         self.done.update(9)
 
 
 def test():
     app = QApplication(sys.argv)
-    impath = './test7/td1.mov'
-    fallimpath = './test7/td_fall.mov'
-    direc = './test7/project'
+    impath = './test/td2.mov'
+    fallimpath = './test/td_fall.mov'
+    direc = './test/pro2'
     if not os.path.exists(direc):
         os.mkdir(direc)
     m = MainTabControl(impath,fallimpath,direc)

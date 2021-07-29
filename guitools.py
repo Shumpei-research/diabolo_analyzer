@@ -11,7 +11,7 @@ QLineEdit,
 QVBoxLayout, QHBoxLayout,
 QTabWidget,QLabel,QTreeWidget,QTreeWidgetItem,
 )
-from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem
+from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QMenuBar, QAction
 from PyQt5.QtCore import  Qt, pyqtSignal,QTimer
 from PyQt5.QtGui import QBrush,QColor,QPainter
 
@@ -22,9 +22,19 @@ class MainTabWindowBase(QWidget):
     def __init__(self,parent=None):
         super().__init__(parent)
         self.tab = QTabWidget(self)
+        self.menu = QMenuBar(self)
         self.metalayout = QVBoxLayout()
         self.setLayout(self.metalayout)
+        self.metalayout.addWidget(self.menu)
         self.metalayout.addWidget(self.tab)
+
+        self.saveAction = QAction("save", self)
+        self.loadAction = QAction("load", self)
+        self.beginAction = QAction("begin", self)
+        actionmenu = self.menu.addMenu("action")
+        actionmenu.addAction(self.saveAction)
+        actionmenu.addAction(self.loadAction)
+        actionmenu.addAction(self.beginAction)
 
 
 class CustomTreeItemStr(QTreeWidgetItem):

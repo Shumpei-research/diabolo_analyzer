@@ -97,7 +97,7 @@ class MaskMaker(object):
 
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QTabWidget, QVBoxLayout
 from guitools import EditorAndView, ImageBaseKeyControl, ROItool, StickPositionEditorBase
-from visualize import DrawRectangle
+from visualize import DrawRectangle, NewDrawing
 
 class TrackerWidget(ROItool):
     def __init__(self,parent=None):
@@ -2679,19 +2679,230 @@ class TestForce():
         dfnew = pd.concat((df,res),axis=1)
         dfnew.to_csv(dfnewpath)
 
+import scipy.optimize
+
+class TensionOptimization():
+    def __init__(self,chain,force,phi,tl,tr,tl_e,tr_e):
+        self.string_vectors = [self._phi2vector(p[:,0],p[:,1]) for p in phi]
+        self.initial_tension = self._initial_tension(chain,force,tl,tr,tl_e,tr_e)
+        self.chain = chain
+        self.force = force
+        self.optimized,self.optimized_force,\
+        self.new_tl,self.new_tr,self.new_torque = self._optimize()
+    def get(self):
+        return self.optimized, self.optimized_force,\
+        self.new_tl,self.new_tr,self.new_torque
+    def _optimize(self):
+        out = copy.deepcopy(self.initial_tension)
+        out_force = copy.deepcopy(self.force)
+        dianum = len(self.force)
+        new_torque = np.zeros((self.force[0].shape[0],dianum))
+        new_tl = np.zeros((self.force[0].shape[0],dianum))
+        new_tr = np.zeros((self.force[0].shape[0],dianum))
+        for i in range(len(self.initial_tension)):
+            ini = self.initial_tension[i]
+            if ini.shape[0]<3:
+                continue
+            diaix = [int(c[1:]) for c in self.chain[i][1:-1]]
+            vec = np.zeros((ini.shape[0]-1,2,2))
+            force = np.zeros((ini.shape[0]-1,2))
+            for j,d in enumerate(diaix):
+                vec[j,:,:] = self.string_vectors[d][i,:,:]
+                force[j,:] = self.force[d][i,:]
+            lower = [0 for k in range(ini.shape[0])]
+            upper = [np.inf for k in range(ini.shape[0])]
+            b = scipy.optimize.Bounds(lower,upper)
+            result = scipy.optimize.minimize(self._cost,ini,(vec,force),bounds=b)
+
+            out[i] = result.x
+
+        for i in range(len(self.initial_tension)):
+            if len(self.chain[i])<3:
+                continue
+            diaix = [int(c[1:]) for c in self.chain[i][1:-1]]
+            for j,d in enumerate(diaix):
+                new_tl[i,d] = out[i][j]
+                new_tr[i,d] = out[i][j+1]
+                new_torque[i,d] = new_tr[i,d]-new_tl[i,d]
+            t = out[i]
+            vec = np.zeros((len(diaix),2,2))
+            for j,d in enumerate(diaix):
+                vec[j,:,:] = self.string_vectors[d][i,:,:]
+            newforce = self._t2f(t,vec)
+            for j,d in enumerate(diaix):
+                out_force[d][i,:] = newforce[j]
+        return out,out_force,new_tl,new_tr,new_torque
+
+    def _initial_tension(self,chain,force,tl,tr,tl_e,tr_e):
+        tension = [np.zeros(0) for i in chain]
+        for i,c in enumerate(chain):
+            if len(c)>0:
+                tension[i] = np.zeros(len(c)-1)
+        for i,c in enumerate(chain):
+            if len(c)<=1:
+                continue
+            if len(c)==2:
+                tension[i][0]=0.0
+                continue
+            if len(c)==3:
+                diaix = int(c[1][1:])
+                tension[i][0] = tl[diaix][i]
+                tension[i][-1] = tr[diaix][i]
+                if tension[i][0]<0 and tension[i][-1]<0:
+                    tension[i][0]=0
+                    tension[i][-1]=0
+                    continue
+                if tension[i][0]<0:
+                    tension[i][0]=0
+                    tension[i][-1] = self._guess_opposite(
+                        self.string_vectors[diaix][i,:,:],force[diaix][i,:],tension[i][0],'r')
+                    continue
+                if tension[i][-1]<0:
+                    tension[i][-1]=0
+                    tension[i][0] = self._guess_opposite(
+                        self.string_vectors[diaix][i,:,:],force[diaix][i,:],tension[i][-1],'l')
+                    continue
+                continue
+
+            for j in range(len(c)-3):
+                key1 = c[j+1]
+                key2 = c[j+2]
+                diaix1 = int(key1[1:])
+                diaix2 = int(key2[1:])
+                tl_s = tl[diaix2][i]
+                tr_s = tr[diaix1][i]
+                tle_s = tl_e[diaix2][i]
+                tre_s = tr_e[diaix1][i]
+                ratio = tre_s /(tre_s + tle_s)
+                tension[i][j+1] = tr_s*(1-ratio) + tl_s*ratio
+                if tension[i][j+1]<0:
+                    tension[i][j+1]=0
+            diaix = int(c[1][1:])
+            tension[i][0] = self._guess_opposite(
+                self.string_vectors[diaix][i,:,:],force[diaix][i,:],tension[i][1],'l')
+            diaix = int(c[-2][1:])
+            tension[i][-1] = self._guess_opposite(
+                self.string_vectors[diaix][i,:,:],force[diaix][i,:],tension[i][-2],'r')
+        return tension
+
+    def _phi2vector(self,phil,phir):
+        vecl = np.stack([np.cos(phil),-np.sin(phil)],axis=1)
+        vecr = np.stack([np.cos(phir),-np.sin(phir)],axis=1)
+        vec = np.stack((vecl,vecr),axis=1)
+        return vec
+    
+    def _guess_opposite(self,vec,force,tension,toguess):
+        if toguess=='l':
+            v = vec[0,:]
+            v_ori = vec[1,:]
+        elif toguess=='r':
+            v = vec[1,:]
+            v_ori = vec[0,:]
+        ten = tension*v_ori
+        rest = force - ten
+        res = np.sum(rest*v)
+        return res
+    
+    def _t2f(self,tension,vec):
+        force = np.zeros((tension.shape[0]-1,2))
+        for i in range(force.shape[0]):
+            tl = tension[i]
+            tr = tension[i+1]
+            vecl = vec[i,0,:]
+            vecr = vec[i,1,:]
+            force[i,:] = tl*vecl + tr*vecr
+        return force
+
+    def _cost(self,tension,vec,force):
+        current_f = self._t2f(tension,vec)
+        residual = force - current_f
+        cost = np.sum(residual**2)
+        return cost
+
+
+
+
+class TestOptimize():
+    def __init__(self):
+        from analyzer import Results
+        res = Results('./test/pro2')
+        res.load()
+        chain_diff = res.other.by_key('object_chain')
+        framenum = res.other.by_key('frame_number')
+        chain = self.tochain(chain_diff,framenum)
+        dianum = res.other.by_key('dianum')
+        force = [None for i in range(dianum)]
+        phi = [None for i in range(dianum)]
+        tl = [None for i in range(dianum)]
+        tr = [None for i in range(dianum)]
+        tl_e = [None for i in range(dianum)]
+        tr_e = [None for i in range(dianum)]
+        for i in range(dianum):
+            key = 'd'+str(i)
+            force[i] = res.oned.get_cols([key+'_force_x',key+'_force_y']).values
+            phi[i] = res.oned.get_cols([key+'_phi0',key+'_phi1']).values
+            tl[i] = res.oned.get_cols([key+'_tension_l']).values
+            tr[i] = res.oned.get_cols([key+'_tension_r']).values
+            tl_e[i] = res.oned.get_cols([key+'_tl_e']).values
+            tr_e[i] = res.oned.get_cols([key+'_tr_e']).values
+        calc = TensionOptimization(chain,force,phi,tl,tr,tl_e,tr_e)
+        newtension,newforces,newtl,newtr,newtor = calc.get()
+        for i in range(dianum):
+            key = 'd'+str(i)
+            df = pd.DataFrame(newforces[i],columns=[key+'_optforce_x',key+'_optforce_y'])
+            res.oned.add_df(df)
+            name = [key+'_opttl',key+'_opttr',key+'_opttorque']
+            arr = np.stack((newtl[:,i],newtr[:,i],newtor[:,i]),axis=1)
+            df = pd.DataFrame(arr,columns=name)
+            res.oned.add_df(df)
+        res.other.update('tension',newtension)
+        res.save()
+
+    def tochain(self,diff,framenum):
+        chain = []
+        pf = 0
+        frames = diff[0]
+        chains = diff[1]
+        pch = chains[0]
+        for frame,ch in zip(frames,chains):
+            chain += [pch for i in range(pf,frame)]
+            pch = ch
+            pf = frame
+        ch = diff[1][-1]
+        chain += [ch for i in range(pf,framenum)]
+        return chain
+
+
+
+        
+        
+
+        
+
+
+
+
+
+
 
 from guitools import ViewerBase
-from visualize import Drawing2
+from visualize import Drawing2,NewDrawing
 
 class ResultsViewerWidget(ViewerBase):
     def __init__(self,parent=None):
         super().__init__(parent)
-        self.drawing = Drawing2(self.pli)
+        # self.drawing = Drawing2(self.pli)
+        self.drawing = NewDrawing(self.pli)
+        self.pli.showAxis('left',False)
+        self.pli.showAxis('bottom',False)
+
+import pyqtgraph.exporters
 
 class ResultsViewerControl(ViewControlBase):
-    def __init__(self,loader,df,diff_chain,gravity,dianum,
-            stickpos_array):
+    def __init__(self,direc,loader,df,diff_chain,gravity,dianum,
+            stickpos_array,tension):
         super().__init__()
+        self.direc = direc
         self.ld = loader
         self.df = df
         self.diff_chain = diff_chain
@@ -2704,33 +2915,44 @@ class ResultsViewerControl(ViewControlBase):
 
         self.window.drawing.set_fpos(self.ld.framenum)
         objectkeys = diff_chain[1][0]+diff_chain[2][0]+diff_chain[3][0]
-        self.window.drawing.set_objectkeys(objectkeys)
+        # self.window.drawing.set_objectkeys(objectkeys)
         posdict = {}
         for key in objectkeys:
             name = [key+'_savgol_x',key+'_savgol_y']
             posdict[key]=df[name].values
         self.window.drawing.set_positions(posdict)
-        self.window.drawing.set_chain(*self._chain())
+        # self.window.drawing.set_chain(*self._chain())
+        # self.window.drawing.set_string(self._chain()[0],posdict)
+        self.window.drawing.set_string_tension(self._chain()[0],posdict,tension)
         lacc = self.df[['l_ax','l_ay']].values
         racc = self.df[['r_ax','r_ay']].values
         dforcelist = []
         for i in range(self.dianum):
             key = 'd'+str(i)
-            name = [key+'_force_x',key+'_force_y']
+            # name = [key+'_force_x',key+'_force_y']
+            name = [key+'_optforce_x',key+'_optforce_y']
             dforcelist.append(self.df[name].values)
         lflyframes,rflyframes = self._flyframes()
-        self.window.drawing.set_forces(self.grav,lacc,racc,
-            dforcelist,lflyframes,rflyframes,self.massratio)
+        # self.window.drawing.set_forces(self.grav,lacc,racc,
+        #     dforcelist,lflyframes,rflyframes,self.massratio)
+        forcedict = {'l':(lacc-self.grav[0:2])/self.grav[2],'r':(racc-self.grav[0:2])/self.grav[2]}
+        for i in range(len(dforcelist)):
+            forcedict['d'+str(i)] = dforcelist[i]
+        self.window.drawing.set_force(self.grav,forcedict,posdict,lflyframes,rflyframes)
 
+        torquedict = {}
         for i in range(self.dianum):
             key = 'd'+str(i)
-            basename = ['tension_l','tension_r','torque','tl_e','tr_e','dT_e']
+            # basename = ['tension_l','tension_r','torque','tl_e','tr_e','dT_e']
+            basename = ['opttl','opttr','opttorque','tl_e','tr_e','dT_e']
             name = [key+'_'+n for n in basename]
             tension_l,tension_r,torque,tl_e,tr_e,dT_e =[self.df[n].values for n in name]
             tension = np.stack((tension_l,tension_r),axis=1)
             self.window.plotter.add_diabolo()
             self.window.plotter.set_tension_torque(i,
                 np.arange(0,self.ld.framenum),tension,torque,tl_e,tr_e,dT_e)
+            torquedict['d'+str(i)] = torque
+        self.window.drawing.set_torque(torquedict,posdict)
 
         thetadict ={} 
         wrapdict = {}
@@ -2740,7 +2962,8 @@ class ResultsViewerControl(ViewControlBase):
             thetadict[key]=np.squeeze(self.df[name].values)
             name = [key+'_wrapstate']
             wrapdict[key]=np.squeeze(self.df[name].values)
-        self.window.drawing.set_wrap(wrapdict,thetadict)
+        # self.window.drawing.set_wrap(wrapdict,thetadict)
+        self.window.drawing.set_wrap(wrapdict,posdict)
 
 
         self.window.KeyPressed.connect(self.keyinterp)
@@ -2777,13 +3000,31 @@ class ResultsViewerControl(ViewControlBase):
         self.window.blockSignals(True)
         self.fpos = new_fpos
         self.window.setcvimage(self.ld.getframe(self.fpos))
-        self.window.drawing.show_fpos(self.fpos)
-        self.window.drawing.show_positions(self.fpos)
-        self.window.drawing.show_forces(self.fpos)
-        self.window.drawing.show_string(self.fpos)
-        self.window.drawing.show_wrap(self.fpos)
+        # self.window.drawing.show_fpos(self.fpos)
+        # self.window.drawing.show_positions(self.fpos)
+        # self.window.drawing.show_forces(self.fpos)
+        # self.window.drawing.show_string(self.fpos)
+        # self.window.drawing.show_wrap(self.fpos)
+        self.window.drawing.update(self.fpos)
         self.window.plotter.show(self.fpos)
         self.window.blockSignals(False)
+    def keyinterp(self, key):
+        super().keyinterp(key)
+        if key == Qt.Key_S:
+            self.save_pli()
+    def save_pli(self):
+        expo = pg.exporters.ImageExporter(self.window.pli)
+        # expo.parameters()['width'] = 800
+        path = os.path.join(self.direc,'temp_im')
+        if not os.path.exists(path):
+            os.mkdir(path)
+        
+        for i in range(self.ld.framenum):
+        # for i in range(100):
+            print(f'saving:{i}')
+            self.change_fpos(i)
+            p = os.path.join(path,'img_'+str(i)+'.tif')
+            expo.export(p)
 
 class ViewTest():
     def __init__(self):
@@ -2807,9 +3048,8 @@ class ViewTest():
 import sys
 from PyQt5.QtWidgets import QApplication
 def main():
-    app = QApplication(sys.argv)
-    s = TestForce()
-    t = ViewTest()
-    sys.exit(app.exec_())
+    # app = QApplication(sys.argv)
+    s = TestOptimize()
+    # sys.exit(app.exec_())
 if __name__ == '__main__':
     main()
