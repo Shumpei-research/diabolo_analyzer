@@ -135,6 +135,7 @@ class TensionPlotterOne(QWidget):
 
 class Drawing():
     '''
+    depreciated.
     class to add/update drawings (pg.GraphicsItems) to the given canvas (pg.plotItem).
     contains data for all frames.
     update drawings by specifying frame number.
@@ -304,6 +305,7 @@ class Drawing():
             return 0
 
 class Drawing2(Drawing):
+    '''depreciated'''
     def set_forces(self,gravity,lacc,racc,dforcelist,
             lflyframes,rflyframes,massratio):
         self.gvector,self.gnorm = gravity[0:2],gravity[2]
@@ -474,6 +476,7 @@ class DrawCircle(DrawItem):
         if not self.vis:
             return
         self.item.setData([center[0]],[center[1]],symbolSize=rad*2)
+
 class DrawRectangle(DrawItem):
     def defaultsty(self):
         self.sty = dict(pxMode=True,pen={'color':'c','width':2},
@@ -485,6 +488,16 @@ class DrawRectangle(DrawItem):
             return
         nodes = np.array([[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]])
         self.item.setData(nodes[:,0],nodes[:,1])
+
+class DrawRectangleUnit(DrawingUnitBase):
+    def makeitem(self,pli):
+        self.item = DrawRectangle(pli)
+    def set(self,recs):
+        self.recs = recs
+        self.vis = np.any(recs!=0,axis=1)
+    def update(self,fpos):
+        super().update(fpos)
+        self.item.draw(*self.recs[fpos,:])
 
 class DrawText(DrawItem):
     def defaultsty(self):
@@ -564,7 +577,6 @@ class DrawString(DrawItem):
         if not self.vis:
             return
         self.item.setData(nodes[0,:],nodes[1,:])
-
         
 class DrawStringUnit(DrawingUnitBase):
     def makeitem(self,pli):
@@ -819,9 +831,9 @@ class DrawingBase():
     def setvis(self,vis):
         for key,item in self.units.items():
             item.setmastervis(vis[key])
-    def _add(self,key,unit):
+    def _add(self,key,unitcls):
         if not key in self.units.keys():
-            self.units[key] = unit
+            self.units[key] = unitcls(self.pli)
 
 class DefaultSty():
     def __init__(self):
@@ -849,20 +861,24 @@ class NewDrawing(DrawingBase):
         super().__init__(pli)
         self.defsty = DefaultSty()
     def set_fpos(self,framenum):
-        self._add('frame',DrawFrameUnit(self.pli))
+        self._add('frame',DrawFrameUnit)
         self.units['frame'].set(framenum)
     def set_positions(self,posdict):
         for key,pos in posdict.items():
-            self._add(key,DrawPosUnit(self.pli))
+            self._add(key,DrawPosUnit)
             self.units[key].set(pos)
-            self._add(key+'_label',DrawLabelUnit(self.pli))
+            self._add(key+'_label',DrawLabelUnit)
             self.units[key+'_label'].set(pos,key)
             self.units[key+'_label'].setmastervis(False)
+    def set_rectangle(self,key,recs):
+        key2 = key+'_rec'
+        self._add(key2,DrawRectangleUnit)
+        self.units[key2].set(recs)
     def set_string(self,chain,posdict):
-        self._add('string',DrawStringUnit(self.pli))
+        self._add('string',DrawStringUnit)
         self.units['string'].set(posdict,chain)
     def set_string_tension(self,chain,posdict,tension):
-        self._add('colorstring',DrawColorStringUnit(self.pli))
+        self._add('colorstring',DrawColorStringUnit)
         self.units['colorstring'].set(posdict,chain,tension)
     def set_force(self,gravity,forcedict,posdict,lvis,rvis):
         gvector,gnorm = gravity[0:2],gravity[2]
@@ -871,9 +887,9 @@ class NewDrawing(DrawingBase):
         g_normalized = np.tile(g_normalized,(fnum,1))
         for key,force in forcedict.items():
             pos = posdict[key]
-            self._add(key+'_g',DrawArrowUnit(self.pli))
-            self._add(key+'_f',DrawArrowUnit(self.pli))
-            self._add(key+'_totalf',DrawArrowUnit(self.pli))
+            self._add(key+'_g',DrawArrowUnit)
+            self._add(key+'_f',DrawArrowUnit)
+            self._add(key+'_totalf',DrawArrowUnit)
 
             self.units[key+'_g'].set(pos,g_normalized)
             self.units[key+'_g'].setsty(self.defsty.g_arrow)
@@ -907,16 +923,15 @@ class NewDrawing(DrawingBase):
         self.units['r_totalf'].setmastervis(True)
         self.units['r_totalf'].setmastervis(False)
 
-
     def set_wrap(self,wrapdict,posdict):
         for key,wrap in wrapdict.items():
             pos = posdict[key]
-            self._add(key+'_wrap',DrawWrapUnit(self.pli))
+            self._add(key+'_wrap',DrawWrapUnit)
             self.units[key+'_wrap'].set(pos,key,wrap)
             self.units[key+'_label'].setmastervis(False)
             self.units[key+'_wrap'].setmastervis(False)
     def set_torque(self,torque,posdict):
         for key,val in torque.items():
             pos = posdict[key]
-            self._add(key+'_torque',DrawTorqueUnit(self.pli))
+            self._add(key+'_torque',DrawTorqueUnit)
             self.units[key+'_torque'].set(pos,val)

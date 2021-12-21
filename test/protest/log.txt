@@ -1,0 +1,23 @@
+{
+    "operation_log": {
+        "names": [
+            "FallTrack",
+            "FallCircle",
+            "GravityFit"
+        ],
+        "deps": {
+            "FallTrack": [],
+            "FallCircle": [
+                "FallTrack"
+            ],
+            "GravityFit": [
+                "FallCircle"
+            ]
+        },
+        "isdone": {
+            "FallTrack": true,
+            "FallCircle": false,
+            "GravityFit": false
+        }
+    }
+}

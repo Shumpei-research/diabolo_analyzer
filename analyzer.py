@@ -4,11 +4,22 @@ import json
 from abc import ABC,abstractmethod
 import numpy as np
 import pandas as pd
-from PyQt5.QtWidgets import QApplication, QPushButton
 from json import JSONEncoder
 
-from guitools import MainTabWindowBase
-import operations as ope
+from utilities import StickPosition
+from movieimporter import Loader
+from viewer import ResultsViewerControl
+
+from operations.acc import FitPlotControl
+from operations.circle import CircleFitControl
+from operations.chain import ChainAssignControl
+from operations.force import ForceCalcControl
+from operations.gravity import GravityFitControl
+from operations.stickfinder import StickFinderControl
+from operations.stickpos import StickPositionEditorControl
+from operations.tension import TensionOptimization
+from operations.tracking import TrackerMain
+from operations.BGcorrection import BackgroundCorrection,MaskMaker
 
 class DataUnitBase(ABC):
     def __init__(self,name):
@@ -125,17 +136,315 @@ class Results():
         self.f_oned.save(self.direc)
         self.log.save(self.direc)
 
+from PyQt5.QtWidgets import (QApplication, QHBoxLayout, 
+QWidget, QVBoxLayout, QTabWidget,
+QMenuBar, QAction)
 
+
+class Operation(ABC):
+    def __init__(self,res,ld):
+        '''Results and Loader objects will be registered for .finish() method.'''
+        self.res = res
+        self.ld = ld
+    @abstractmethod
+    def isinteractive(self):
+        '''returns True if this operation is interactive'''
+        return True
+    @abstractmethod
+    def getname(self):
+        '''returns this operation's name'''
+        return ''
+    @abstractmethod
+    def do(self):
+        '''perform calculation/interactive operation'''
+        pass
+    @abstractmethod
+    def finish(self):
+        '''will be called after finishing operation to take out data.'''
+        pass
+    @abstractmethod
+    def fin_signal(self):
+        '''returns pyqt signal that will be emited upon finish'''
+        pass
+    @abstractmethod
+    def get_widget(self):
+        '''returns QWidget for this operation'''
+        pass
+
+
+class OperationDependence():
+    def __init__(self):
+        self.names = []
+        self.deps = {}
+        self.isdone = {}
+    def export(self):
+        d = {}
+        d['names'] = self.names
+        d['deps'] = self.deps
+        d['isdone'] = self.isdone
+        return d
+    def load(self,datadict):
+        self.names = datadict['names']
+        self.deps = datadict['deps']
+        self.isdone = datadict['isdone']
+
+    def register(self,new:str,deps:list=None):
+        '''register new operation that depends on deps'''
+        if new in self.names:
+            raise ValueError(f'{new} already exists')
+        if new in self.deps.keys():
+            raise ValueError(f'{new} already exists in deps dictionary (unexpected)')
+        if new in self.isdone.keys():
+            raise ValueError(f'{new} already exists in isdone dictionary (unexpected)')
+
+        self.names.append(new)
+        self.isdone[new] = False
+        if deps is None:
+            self.deps[new] = []
+            return
+        if isinstance(deps,str):
+            deps = [deps,]
+        self.deps[new] = deps
+
+    def unregister(self,name):
+        '''unregister the operation from this instance'''
+        if name not in self.names:
+            raise ValueError(f'{name} not exists')
+        self.names.remove(name)
+        self.deps.pop(name)
+        self.isdone.pop(name)
+    def hasthis(self,name):
+        '''returns True is name exists'''
+        return name in self.names
+    def check(self,name):
+        '''set operation(name) as done'''
+        if name not in self.names:
+            raise ValueError(f'{name} not exists')
+        self.isdone[name] = True
+    def uncheck(self,name):
+        '''set operation(name) as not done'''
+        if name not in self.names:
+            raise ValueError(f'{name} not exists')
+        self.isdone[name] = False
+    def get_eligible(self):
+        '''returns list[name] of performable operations (not done)'''
+        eligibles = []
+        for n in self.names:
+            if self.isdone[n]:
+                continue
+            n_deps = self.deps[n]
+            if len(n_deps) == 0:
+                eligibles.append(n)
+                continue
+            status = [self.isdone[d] for d in n_deps]
+            if all(status):
+                eligibles.append(n)
+        return eligibles
+    def get_done(self):
+        '''returns list[name] of done operations'''
+        dones = [n for n in self.names if self.isdone[n]]
+        return dones
+    def get_noneligible(self):
+        '''returns list[name] of not done and noneligible operations'''
+        eligibles = self.get_eligible()
+        noneligibles = []
+        for n in self.names:
+            if self.isdone[n]:
+                continue
+            if not n in eligibles:
+                noneligibles.append(n)
+        return noneligibles
+
+
+class FallTrack(Operation):
+    def __init__(self,res,ld):
+        self.res = res
+        self.ld = ld
+    def isinteractive(self):
+        return True
+    def getname(self):
+        return 'FallTrack'
+    def do(self):
+        self.fbc = BackgroundCorrection(self.ld)
+        self.fbc.calc()
+        self.fmm = MaskMaker(self.ld,self.fbc.get())
+        self.fmm.calc()
+        self.ftr = TrackerMain(self.fmm.get())
+    def finish(self):
+        df = self.ftr.get_df()
+        name = ['d0_'+n for n in ['x','y','w','h']]
+        df = df[name]
+        self.res.f_oned.add_df(df)
+    def fin_signal(self):
+        return self.ftr.finish_signal()
+    def get_widget(self):
+        return self.ftr.get_window()
+
+class FallCircle(Operation):
+    def __init__(self,res,ld):
+        self.res = res
+        self.ld = ld
+    def isinteractive(self):
+        return True
+    def getname(self):
+        return 'FallCircle'
+    def do(self):
+        df = self.res.f_oned.get()
+        self.fci = CircleFitControl(self.ld,df)
+    def finish(self):
+        df = self.fci.get_df()
+        self.res.f_oned.add_df(df)
+    def fin_signal(self):
+        return self.fci.finish_signal()
+    def get_widget(self):
+        return self.fci.get_window()
+
+class GravityFit(Operation):
+    def __init__(self,res,ld):
+        self.res = res
+        self.ld = ld
+    def isinteractive(self):
+        return True
+    def getname(self):
+        return 'GravityFit'
+    def do(self):
+        name = ['d0'+n for n in ['c_x','c_y']]
+        pos = self.res.f_oned.get_cols(name).values
+        self.gra = GravityFitControl(self.ld,pos)
+    def finish(self):
+        gravity = self.gra.get_g()
+        fall_frame = self.gra.get_frames()
+        self.res.other.update('gravity',gravity)
+        self.res.other.update('fall_frame',fall_frame)
+    def fin_signal(self):
+        self.gra.finish_signal()
+    def get_widget(self):
+        return self.gra.get_window()
+
+class OperationWindow(QWidget):
+    def __init__(self,res,ld,fld,parent=None):
+        super().__init__(parent)
+        self.resize(1200,800)
+        self.res = res
+        self.ld = ld
+        self.fld = fld
+
+        self.operations = []
+        self.ope_actions = []
+        self.ope_dep = OperationDependence()
+        self.ope_names = []
+
+        self.l0 = QVBoxLayout()
+        self.setLayout(self.l0)
+        self.menu = QMenuBar(self)
+        self.l0.addWidget(self.menu)
+
+        self.saveAction = QAction("save", self)
+        self.loadAction = QAction("load", self)
+        filemenu = self.menu.addMenu("file")
+        filemenu.addAction(self.saveAction)
+        filemenu.addAction(self.loadAction)
+        self.saveAction.triggered.connect(self.save)
+        self.loadAction.triggered.connect(self.load)
+
+        self.opemenu = self.menu.addMenu('operation')
+        self.l1 = QHBoxLayout()
+        self.l0.addLayout(self.l1)
+        self.currentWidget = None
+
+        self._add(FallTrack(self.res,self.fld))
+        self._add(FallCircle(self.res,self.fld),['FallTrack',])
+        self._add(GravityFit(self.res,self.fld),['FallCircle',])
+
+        self.ope_actions[0].setEnabled(True)
+
+    def _add(self,ope:Operation,deps=None):
+        index = len(self.operations)
+        name = ope.getname()
+
+        self.operations.append(ope)
+        self.ope_names.append(name)
+        self.ope_dep.register(name,deps)
+
+        newaction = QAction(name)
+        newaction.setDisabled(True)
+        self.ope_actions.append(newaction)
+        self.opemenu.addAction(newaction)
+        def nonint():
+            ope.do()
+            self.finishstep(index)
+        def interactive():
+            ope.do()
+            if self.currentWidget is not None:
+                self.l1.removeWidget(self.currentWidget)
+                self.currentWidget.close()
+            self.currentWidget = ope.get_widget()
+            self.l1.addWidget(self.currentWidget)
+            ope.fin_signal().connect(lambda: self.finishstep(index))
+        if ope.isinteractive():
+            newaction.triggered.connect(interactive)
+        else:
+            newaction.triggered.connect(nonint)
+    
+    def finishstep(self,ix):
+        ope = self.operations[ix]
+        ope.finish()
+        self.ope_dep.check(ope.getname())
+        for opename in self.ope_dep.get_eligible():
+            i = self.ope_names.index(opename)
+            self.ope_actions[i].setEnabled(True)
+    
+    def save(self):
+        self.res.log.update('operation_log',self.ope_dep.export())
+        self.res.save()
+    def load(self):
+        self.res.load()
+        status = self.res.log.by_key('operation_log')
+        self.ope_dep.load(status)
+        for opename in self.ope_dep.get_eligible():
+            i = self.ope_names.index(opename)
+            self.ope_actions[i].setEnabled(True)
+        for opename in self.ope_dep.get_done():
+            i = self.ope_names.index(opename)
+            self.ope_actions[i].setEnabled(True)
+        
+
+
+class MainControl():
+    def __init__(self,direc,impath,fallpath):
+        self.direc = direc
+        self.res = Results(direc)
+        self.ld = Loader(impath)
+        self.fld = Loader(fallpath)
+        self.wid = OperationWindow(self.res,self.ld,self.fld)
+        self.wid.show()
+
+
+class MainTabWindowBase(QWidget):
+    '''depreciated'''
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.tab = QTabWidget(self)
+        self.menu = QMenuBar(self)
+        self.metalayout = QVBoxLayout()
+        self.setLayout(self.metalayout)
+        self.metalayout.addWidget(self.menu)
+        self.metalayout.addWidget(self.tab)
+
+        self.saveAction = QAction("save", self)
+        self.loadAction = QAction("load", self)
+        self.beginAction = QAction("begin", self)
+        actionmenu = self.menu.addMenu("action")
+        actionmenu.addAction(self.saveAction)
+        actionmenu.addAction(self.loadAction)
+        actionmenu.addAction(self.beginAction)
 
 class MainTabWindow(MainTabWindowBase):
+    '''depreciated'''
     def __init__(self,parent=None):
         super().__init__(parent)
         self.tab.setStyleSheet("QTabWidget::pane { border: 0; }")
         self.resize(1200,800)
-        # self.p = QPushButton('save')
-        # self.metalayout.addWidget(self.p)
-        # self.p2 = QPushButton('load')
-        # self.metalayout.addWidget(self.p2)
 
     def addTab(self,wid,name,ix):
         if ix>=self.tab.count():
@@ -147,29 +456,29 @@ class MainTabWindow(MainTabWindowBase):
         self.tab.setCurrentWidget(wid)
 
 
-class DoneFlag():
-    def __init__(self,logres:ResultsDict):
-        self.ix = -1
-        self.logres=logres
-    def get(self):
-        return self.ix
-    def update(self,ix):
-        if self.ix<ix:
-            self.ix = ix
-        self.logres.update('done',self.ix)
+# class DoneFlag():
+#     def __init__(self,logres:ResultsDict):
+#         self.ix = -1
+#         self.logres=logres
+#     def get(self):
+#         return self.ix
+#     def update(self,ix):
+#         if self.ix<ix:
+#             self.ix = ix
+#             self.logres.update('done',self.ix)
 
 class MainTabControl():
+    '''depreciated'''
     def __init__(self,impath,fallimpath,direc):
         self.window = MainTabWindow()
         self.direc = direc
         self.res = Results(direc)
         self.done = DoneFlag(self.res.log)
-        self.res.log.update('done',self.done)
-        # self.window.p.clicked.connect(self.res.save)
-        # self.window.p2.clicked.connect(self.load)
-        self.ld = ope.Loader(impath)
-        self.fld = ope.Loader(fallimpath)
+        self.ld = Loader(impath)
+        self.fld = Loader(fallimpath)
 
+        self.res.log.update('fall_moviefile',fallimpath)
+        self.res.log.update('moviefile',impath)
         self.res.other.update('frame_number',self.ld.framenum)
         self.res.other.update('fall_frame_number',self.fld.framenum)
 
@@ -207,11 +516,11 @@ class MainTabControl():
             self.result_view()
 
     def fall_tracking(self):
-        self.fbc = ope.BackgroundCorrection(self.fld)
+        self.fbc = BackgroundCorrection(self.fld)
         self.fbc.calc()
-        self.fmm = ope.MaskMaker(self.fld,self.fbc.get())
+        self.fmm = MaskMaker(self.fld,self.fbc.get())
         self.fmm.calc()
-        self.ftr = ope.TrackerMain(self.fmm.get())
+        self.ftr = TrackerMain(self.fmm.get())
         self.window.addTab(self.ftr.get_window(),'fall tracker',0)
         self.ftr.finish_signal().connect(self.ft_fin)
     def ft_fin(self):
@@ -223,7 +532,7 @@ class MainTabControl():
         self.fall_circle()
     def fall_circle(self):
         df = self.res.f_oned.get()
-        self.fci = ope.CircleFitControl(self.fld,df)
+        self.fci = CircleFitControl(self.fld,df)
         self.window.addTab(self.fci.get_window(),'fall circle',1)
         self.fci.finish_signal().connect(self.fc_fin)
     def fc_fin(self):
@@ -234,7 +543,7 @@ class MainTabControl():
     def gravity_fit(self):
         name = ['d0'+n for n in ['c_x','c_y']]
         pos = self.res.f_oned.get_cols(name).values
-        self.gra = ope.GravityFitControl(self.fld,pos)
+        self.gra = GravityFitControl(self.fld,pos)
         self.window.addTab(self.gra.get_window(),'gravity fit',2)
         self.gra.finish_signal().connect(self.gra_fin)
     def gra_fin(self):
@@ -245,11 +554,11 @@ class MainTabControl():
         self.res.other.update('fall_frame',fall_frame)
         self.tracking()
     def tracking(self):
-        self.bc = ope.BackgroundCorrection(self.ld)
+        self.bc = BackgroundCorrection(self.ld)
         self.bc.calc()
-        self.mm = ope.MaskMaker(self.ld,self.bc.get())
+        self.mm = MaskMaker(self.ld,self.bc.get())
         self.mm.calc()
-        self.tra = ope.TrackerMain(self.mm.get())
+        self.tra = TrackerMain(self.mm.get())
         self.window.addTab(self.tra.get_window(),'tracker',3)
         self.tra.finish_signal().connect(self.tra_fin)
     def tra_fin(self):
@@ -261,7 +570,7 @@ class MainTabControl():
         self.circle_fit()
     def circle_fit(self):
         df = self.res.oned.get()
-        self.cir = ope.CircleFitControl(self.ld,df)
+        self.cir = CircleFitControl(self.ld,df)
         self.window.addTab(self.cir.get_window(),'circle',4)
         self.cir.finish_signal().connect(self.cir_fin)
     def cir_fin(self):
@@ -270,7 +579,7 @@ class MainTabControl():
         self.res.oned.add_df(df)
         self.stick_pos()
     def stick_pos(self):
-        self.sti = ope.StickPositionEditorControl(self.ld)
+        self.sti = StickPositionEditorControl(self.ld)
         self.window.addTab(self.sti.get_window(),'stipos',5)
         self.sti.finish_signal().connect(self.pos_fin)
     def pos_fin(self):
@@ -285,9 +594,9 @@ class MainTabControl():
         stifra = self.res.other.by_key('stickposition','frame')
         stista = self.res.other.by_key('stickposition','state')
         framenum = self.res.other.by_key('frame_number')
-        stipos = ope.StickPosition(framenum)
+        stipos = StickPosition(framenum)
         stipos.loadchanges(stifra,stista)
-        self.stif = ope.StickFinderControl(self.ld,df,stipos)
+        self.stif = StickFinderControl(self.ld,df,stipos)
         self.window.addTab(self.stif.get_window(),'stickfind',6)
         self.stif.finish_signal().connect(self.stif_fin)
     def stif_fin(self):
@@ -307,7 +616,7 @@ class MainTabControl():
         for i in range(dianum):
             dname = ['d'+str(i)+n for n in dbasename]
             dposlist.append(self.res.oned.get_cols(dname).values)
-        self.sav = ope.FitPlotControl(lpos,rpos,dposlist)
+        self.sav = FitPlotControl(lpos,rpos,dposlist)
         self.window.addTab(self.sav.get_window(),'savgol',7)
         self.sav.finish_signal().connect(self.sav_fin)
     def sav_fin(self):
@@ -330,9 +639,9 @@ class MainTabControl():
         stifra = self.res.other.by_key('stickposition','frame')
         stista = self.res.other.by_key('stickposition','state')
         framenum = self.res.other.by_key('frame_number')
-        stipos = ope.StickPosition(framenum)
+        stipos = StickPosition(framenum)
         stipos.loadchanges(stifra,stista)
-        self.ca = ope.ChainAssignControl(self.ld,lpos,rpos,dposlist,stipos)
+        self.ca = ChainAssignControl(self.ld,lpos,rpos,dposlist,stipos)
         self.window.addTab(self.ca.get_window(),'chain',8)
         self.ca.finish_signal().connect(self.ca_fin)
     def ca_fin(self):
@@ -353,7 +662,7 @@ class MainTabControl():
             acc[i] = self.res.oned.get_cols([key+'_ax',key+'_ay']).values
             phi[i] = self.res.oned.get_cols([key+'_phi0',key+'_phi1']).values
             theta[i] = self.res.oned.get_cols([key+'_theta']).values
-        self.frc = ope.ForceCalcControl(grav,acc,phi,theta)
+        self.frc = ForceCalcControl(grav,acc,phi,theta)
         # no interaction
         self.force_fin()
     def force_fin(self):
@@ -379,7 +688,7 @@ class MainTabControl():
             tr[i] = self.res.oned.get_cols([key+'_tension_r']).values
             tl_e[i] = self.res.oned.get_cols([key+'_tl_e']).values
             tr_e[i] = self.res.oned.get_cols([key+'_tr_e']).values
-        self.tenop = ope.TensionOptimization(chain,force,phi,tl,tr,tl_e,tr_e)
+        self.tenop = TensionOptimization(chain,force,phi,tl,tr,tl_e,tr_e)
         # no interaction
         self.tension_fin()
     def tension_fin(self):
@@ -418,10 +727,10 @@ class MainTabControl():
         stista = self.res.other.by_key('stickposition','state')
         framenum = self.res.other.by_key('frame_number')
         tension = self.res.other.by_key('tension')
-        stipos = ope.StickPosition(framenum)
+        stipos = StickPosition(framenum)
         stipos.loadchanges(stifra,stista)
         stiposarr = stipos.get_array()
-        self.view = ope.ResultsViewerControl(self.direc,self.ld,df,chain,grav,dianum,stiposarr,tension)
+        self.view = ResultsViewerControl(self.direc,self.ld,df,chain,grav,dianum,stiposarr,tension)
         self.window.addTab(self.view.get_window(),'result',9)
         self.done.update(9)
 
@@ -430,11 +739,12 @@ def test():
     app = QApplication(sys.argv)
     impath = './test/td2.mov'
     fallimpath = './test/td_fall.mov'
-    direc = './test/pro2'
+    direc = './test/protest'
     if not os.path.exists(direc):
         os.mkdir(direc)
-    m = MainTabControl(impath,fallimpath,direc)
-    m.get_window().show()
+    # m = MainTabControl(impath,fallimpath,direc)
+    # m.get_window().show()
+    m = MainControl(direc,impath,fallimpath)
     sys.exit(app.exec_())
 
 def main():
@@ -449,4 +759,4 @@ def main():
     sys.exit(app.exec_())
 
 if __name__ == '__main__':
-    main()
+    test()
