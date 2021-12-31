@@ -1,10 +1,33 @@
 from copy import deepcopy
-from abc import ABC,abstractmethod
+from abc import ABC, ABCMeta,abstractmethod
+import copy
+
 import numpy as np
+import cv2
+
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QHBoxLayout, QVBoxLayout,
+from PyQt5.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QSlider, QSplitter, QVBoxLayout,
 QWidget)
 from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (QApplication, QTextEdit,
+QWidget, QPushButton,  
+QLineEdit,
+QVBoxLayout, QHBoxLayout,
+QTabWidget,QLabel,QTreeWidget,QTreeWidgetItem,
+QTableWidget, QTableWidgetItem, QMenuBar, QAction)
+from PyQt5.QtCore import  QRectF, Qt, pyqtSignal,QTimer
+from PyQt5.QtGui import QBrush,QColor,QPainter
+
+
+
+
+
+
+
+
+
+
+
 
 
 class TensionTorquePlotter(QWidget):
@@ -133,246 +156,6 @@ class TensionPlotterOne(QWidget):
         self.p2.setXRange(fpos-5,fpos+6)
 
 
-class Drawing():
-    '''
-    depreciated.
-    class to add/update drawings (pg.GraphicsItems) to the given canvas (pg.plotItem).
-    contains data for all frames.
-    update drawings by specifying frame number.
-    '''
-    def __init__(self,plotitem):
-        self.pli = plotitem
-        self.item = {}
-        self.dianum = 0
-        self.mastervis = {}
-        self.framevis = {}
-    def clear(self):
-        for item in self.item.values():
-            item.clear()
-        self.item={}
-    def getsty(self):
-        sty = {key:item.getsty() for key,item in self.item.items()}
-        return sty
-    def setsty(self,sty):
-        for key,item in self.item.items():
-            item.setsty(sty[key])
-    def getvis(self):
-        return self.mastervis
-    def setvis(self,vis):
-        self.mastervis = vis
-    def _check(self,key,fp):
-        if key not in self.mastervis.keys():
-            self.mastervis[key]=self.item[key].getvis()
-        m = self.mastervis[key]
-        f = self.framevis[key][fp]
-        def _rec_and(a,b):
-            if isinstance(a,bool):
-                return a and b
-            if isinstance(a,dict):
-                out = {}
-                for key in a.keys():
-                    out[key]=_rec_and(a[key],b[key])
-                return out
-        vis = _rec_and(m,f)
-        self.item[key].setvis(vis)
-    def set_fpos(self,framenum):
-        self.item['frame'] = DrawTextFixedPos(self.pli)
-        self.framevis['frame'] = [True for i in range(framenum)]
-    def show_fpos(self,fp):
-        if 'frame' not in self.item.keys():
-            return
-        self._check('frame',fp)
-        self.item['frame'].draw(f'frame: {fp}')
-    def set_objectkeys(self,objectkeys):
-        self.objectkeys = objectkeys
-        self.dianum=0
-        for key in objectkeys:
-            if key in ['l','r']:
-                self.item.update({key:DrawPos(self.pli)})
-                self.item.update({key+'_key':DrawText(self.pli)})
-            elif key[0]=='d':
-                self.item.update({key:DrawPos(self.pli)})
-                self.item.update({key+'_key':DrawText(self.pli)})
-                self.dianum += 1
-    def set_positions(self,posdict):
-        '''pos = ndarray(frames,x-y)'''
-        self.posdict = posdict
-        for key,pos in self.posdict.items():
-            self.framevis[key]=list(~np.all(pos==0,axis=1))
-            self.framevis[key+'_key']=list(~np.all(pos==0,axis=1))
-    def show_positions(self,fp):
-        if not hasattr(self,'objectkeys'):
-            return
-        for key in self.objectkeys:
-            dpos = self.posdict[key][fp,:]
-            self._check(key,fp)
-            self.item[key].draw(dpos)
-            self._check(key+'_key',fp)
-            self.item[key+'_key'].draw(key,dpos)
-    def set_chain(self,chain,flying):
-        self.item.update({'string':DrawString(self.pli)})
-        self.chain = chain
-        self.flying = flying
-        self.framevis['string']=[len(c)>1 for c in chain]
-    def show_string(self,fp):
-        if 'string' not in self.item.keys():
-            return
-        pos = []
-        for key in self.chain[fp]:
-            pos.append(self.posdict[key][fp,:])
-        nodes = np.array(pos).T
-        self._check('string',fp)
-        self.item['string'].draw(nodes)
-    def set_forces(self,gravity,forcedict):
-        ''' gravity: (gx,gy,gnorm)'''
-        self.gvector,self.gnorm = gravity[0:2],gravity[2]
-        self.forcedict = forcedict
-        for key in self.objectkeys:
-            ga = DrawArrow(self.pli)
-            sty = ga.getsty()
-            sty['head']['brush']=(50,50,50)
-            sty['stem']['pen']['color']=(50,50,50)
-            if key in ['l','r']:
-                sty['factor']=7.5
-            ga.setsty(sty)
-            self.item.update({key+'_g':ga})
-
-            fa = DrawArrow(self.pli)
-            sty = fa.getsty()
-            if key in ['l','r']:
-                sty['factor']=7.5
-            fa.setsty(sty)
-            self.item.update({key+'_f':fa})
-
-            toa = DrawArrow(self.pli)
-            sty = toa.getsty()
-            sty['head']['brush']=(150,50,50)
-            sty['stem']['pen']['color']=(150,50,50)
-            if key in ['l','r']:
-                sty['factor']=7.5
-            toa.setsty(sty)
-            self.item.update({key+'_totalf':toa})
-
-            ix = self.framevis[key]
-            self.framevis.update({
-                key+'_g': deepcopy(ix),
-                key+'_f': deepcopy(ix),
-                key+'_totalf': deepcopy(ix)
-            })
-            self.mastervis[key+'_totalf']=False
-            if key in ['l','r']:
-                self.mastervis[key+'_g']=False
-                self.mastervis[key+'_f']=False
-    def show_forces(self,fp):
-        g_normalized = np.array(self.gvector)/self.gnorm
-        for key in self.objects:
-            pos = self.posdict[key][fp,:]
-            f = self.forcedict[key][fp,:]
-            f_normalized = f
-            total = f_normalized + g_normalized
-            self._check(key+'_g',fp)
-            self._check(key+'_f',fp)
-            self._check(key+'_totalf',fp)
-            self.item[key+'_g'].draw(g_normalized,pos)
-            self.item[key+'_f'].draw(f_normalized,pos)
-            self.item[key+'_totalf'].draw(total,pos)
-    def set_wrap(self,wrapdict,angledict):
-        '''angledict: generalized wrap angle'''
-        self.wrapstates = wrapdict
-        self.wrapangles = angledict
-    def show_wrap(self,fp):
-        for i in range(self.dianum):
-            key = 'd'+str(i)
-            if key not in self.posdict.keys():
-                return
-            dpos = self.posdict[key][fp,:]
-            if not hasattr(self,'wrapstates'):
-                return
-            if key not in self.wrapstates.keys():
-                return
-            state = self.wrapstates[key][fp]
-            angle = self._contactangle(self.wrapangles[key][fp])
-            txt = f'{key}:{state}:{angle:.1f}'
-            self._check(key,fp)
-            self.item[key+'_key'].draw(txt,dpos)
-    def _contactangle(self,generalangle):
-        a = generalangle/(2*np.pi)
-        if a>0.5:
-            return a-0.5
-        if a<-0.5:
-            return a+0.5
-        if -0.5<=a and a<=0.5:
-            return 0
-
-class Drawing2(Drawing):
-    '''depreciated'''
-    def set_forces(self,gravity,lacc,racc,dforcelist,
-            lflyframes,rflyframes,massratio):
-        self.gvector,self.gnorm = gravity[0:2],gravity[2]
-        self.lacc = lacc
-        self.racc = racc
-        self.dforcelist = dforcelist
-        for key in self.objectkeys:
-            ga = DrawArrow(self.pli)
-            sty = ga.getsty()
-            sty['head']['brush']=(50,50,50)
-            sty['stem']['pen']['color']=(50,50,50)
-            if key in ['l','r']:
-                sty['factor']=30.0/massratio
-            ga.setsty(sty)
-            self.item.update({key+'_g':ga})
-
-            fa = DrawArrow(self.pli)
-            sty = fa.getsty()
-            if key in ['l','r']:
-                sty['factor']=30.0/massratio
-            fa.setsty(sty)
-            self.item.update({key+'_f':fa})
-
-            toa = DrawArrow(self.pli)
-            sty = toa.getsty()
-            sty['head']['brush']=(150,50,50)
-            sty['stem']['pen']['color']=(150,50,50)
-            if key in ['l','r']:
-                sty['factor']=30.0/massratio
-            toa.setsty(sty)
-            self.item.update({key+'_totalf':toa})
-
-            ix = self.framevis[key]
-            self.framevis.update({
-                key+'_g': deepcopy(ix),
-                key+'_f': deepcopy(ix),
-                key+'_totalf': deepcopy(ix)
-            })
-            self.mastervis[key+'_totalf']=False
-        self.framevis['l_g'] = deepcopy(lflyframes)
-        self.framevis['l_f'] = deepcopy(lflyframes)
-        self.framevis['l_totalf'] = deepcopy(lflyframes)
-        self.framevis['r_g'] = deepcopy(rflyframes)
-        self.framevis['r_f'] = deepcopy(rflyframes)
-        self.framevis['r_totalf'] = deepcopy(rflyframes)
-    def show_forces(self, fp):
-        g_normalized = np.array(self.gvector)/self.gnorm
-        for key in self.objectkeys:
-            pos = self.posdict[key][fp,:]
-            if key[0]=='d':
-                ix = int(key[1:])
-                f = self.dforcelist[ix][fp,:]
-                f_normalized = f
-                total = f_normalized + g_normalized
-            elif key =='l':
-                total = self.lacc[fp,:]/self.gnorm
-                f_normalized = total - g_normalized
-            elif key =='r':
-                total = self.racc[fp,:]/self.gnorm
-                f_normalized = total - g_normalized
-            self._check(key+'_g',fp)
-            self._check(key+'_f',fp)
-            self._check(key+'_totalf',fp)
-            self.item[key+'_g'].draw(g_normalized,pos)
-            self.item[key+'_f'].draw(f_normalized,pos)
-            self.item[key+'_totalf'].draw(total,pos)
-
 
 
 class DrawItem(ABC):
@@ -391,11 +174,9 @@ class DrawItem(ABC):
     def setvis(self,vis):
         if (not self.vis) and vis:
             self.item.setVisible(True)
-            # self.pli.addItem(self.item)
             self.vis = vis
         if self.vis and (not vis):
             self.item.setVisible(False)
-            # self.pli.removeItem(self.item)
             self.vis = vis
     def getvis(self):
         return self.vis
@@ -477,6 +258,19 @@ class DrawCircle(DrawItem):
             return
         self.item.setData([center[0]],[center[1]],symbolSize=rad*2)
 
+class DrawCircleUnit(DrawingUnitBase):
+    def makeitem(self,pli):
+        self.item = DrawCircle(pli)
+    def set(self,center,rad):
+        '''center: ndarray[frame,(x,y)],
+        rad: ndarray[frame]'''
+        self.center = center
+        self.rad = rad
+        self.vis = rad!=0
+    def update(self,fpos):
+        super().update(fpos)
+        self.item.draw(self.center[fpos,:],self.rad[fpos])
+
 class DrawRectangle(DrawItem):
     def defaultsty(self):
         self.sty = dict(pxMode=True,pen={'color':'c','width':2},
@@ -502,7 +296,7 @@ class DrawRectangleUnit(DrawingUnitBase):
 class DrawText(DrawItem):
     def defaultsty(self):
         self.sty={
-        'main':{'color':'w','anchor':(0.0,0.0),
+        'main':{'color':'w','anchor':(0.0,1.0),
             'fill':(100,100,100,100)},
         'font':{'pointSize':20}
         }
@@ -832,8 +626,15 @@ class DrawingBase():
         for key,item in self.units.items():
             item.setmastervis(vis[key])
     def _add(self,key,unitcls):
+        '''insanciate DrawingUnit(unitcls) and register if not existing.
+        Set mastervis True in either existing or not.'''
         if not key in self.units.keys():
             self.units[key] = unitcls(self.pli)
+        self.units[key].setmastervis(True)
+    def vis_off(self):
+        '''set mastervis False for every units'''
+        for item in self.units.values():
+            item.setmastervis(False)
 
 class DefaultSty():
     def __init__(self):
@@ -856,7 +657,7 @@ class DefaultSty():
         'headlenfactor': 0.3
         }
 
-class NewDrawing(DrawingBase):
+class Drawing(DrawingBase):
     def __init__(self,pli):
         super().__init__(pli)
         self.defsty = DefaultSty()
@@ -874,6 +675,11 @@ class NewDrawing(DrawingBase):
         key2 = key+'_rec'
         self._add(key2,DrawRectangleUnit)
         self.units[key2].set(recs)
+    def set_circle(self,key,center,rad):
+        newkey = key+'_circle'
+        self._add(newkey,DrawCircleUnit)
+        self.units[newkey].set(center,rad)
+
     def set_string(self,chain,posdict):
         self._add('string',DrawStringUnit)
         self.units['string'].set(posdict,chain)
@@ -915,12 +721,10 @@ class NewDrawing(DrawingBase):
         self.units['l_g'].setvis(lvis)
         self.units['l_f'].setvis(lvis)
         self.units['l_totalf'].setvis(lvis)
-        self.units['l_totalf'].setmastervis(True)
         self.units['l_totalf'].setmastervis(False)
         self.units['r_g'].setvis(rvis)
         self.units['r_f'].setvis(rvis)
         self.units['r_totalf'].setvis(rvis)
-        self.units['r_totalf'].setmastervis(True)
         self.units['r_totalf'].setmastervis(False)
 
     def set_wrap(self,wrapdict,posdict):
@@ -930,8 +734,642 @@ class NewDrawing(DrawingBase):
             self.units[key+'_wrap'].set(pos,key,wrap)
             self.units[key+'_label'].setmastervis(False)
             self.units[key+'_wrap'].setmastervis(False)
+
     def set_torque(self,torque,posdict):
         for key,val in torque.items():
             pos = posdict[key]
             self._add(key+'_torque',DrawTorqueUnit)
             self.units[key+'_torque'].set(pos,val)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class ImageWidget(QWidget):
+    def __init__(self,parent=None):
+        super().__init__(parent)
+
+        self.l0 = QHBoxLayout()
+        self.glw = pg.GraphicsLayoutWidget(self)
+        self.setLayout(self.l0)
+        self.l0.addWidget(self.glw)
+        self.pli = pg.PlotItem()
+        self.pli.setAspectLocked()
+        self.imi = pg.ImageItem()
+        self.pli.addItem(self.imi)
+        self.vb = self.pli.getViewBox()
+        self.glw.addItem(self.pli)
+
+        self.maskim = pg.ImageItem()
+        self.vb.addItem(self.maskim)
+        self.maskim.setZValue(10)
+        self.maskim.setOpacity(0.5)
+        self.maskim.setLookupTable(np.array([[0,0,0],[255,255,0]]))
+        self.maskim.setOpts(compositionMode=QPainter.CompositionMode_Plus)
+
+    
+    def get_pli(self):
+        return self.pli
+
+    def setcvimage(self,im):
+        nim = np.swapaxes(im,0,1)
+        nim = cv2.cvtColor(nim,cv2.COLOR_BGR2RGB)
+        self.imi.setImage(nim)
+    def setRect(self,*args):
+        rect = QRectF(*args)
+        self.imi.setRect(rect)
+        self.maskim.setRect(rect)
+        self.pli.setRange(rect)
+
+    def add_mask(self):
+        self.vb.addItem(self.maskim)
+    def del_mask(self):
+        self.vb.removeItem(self.maskim)
+    def setmask(self,mask):
+        mask = np.swapaxes(mask,0,1)
+        self.maskim.setImage(mask)
+
+
+
+
+class SliderWidget(QWidget):
+    '''QSilder plus que functions'''
+    PositionChanged=pyqtSignal(int)
+
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.l0 = QVBoxLayout()
+        self.setLayout(self.l0)
+        self.slider = QSlider(Qt.Horizontal)
+        self.l0.addWidget(self.slider)
+        self.que_layout = QHBoxLayout()
+        self.l0.addLayout(self.que_layout)
+        self.ques = np.array([],dtype=int)
+        self.que_buttons = []
+
+        self._timer = QTimer()
+        self._timer.timeout.connect(self.inactive_end)
+
+    def set_framenum(self,min:int,max:int):
+        '''max should be framenum-1 '''
+        self.slider.setMinimum(min)
+        self.slider.setMaximum(max)
+        self.slider.setSingleStep(1)
+        self.slider.valueChanged.connect(self._pos_changed)
+
+    def add_que(self,que:int,label:str=''):
+        button = QPushButton(str(que)+'\n'+label)
+        ind = self.ques.searchsorted(que)
+        self.ques = np.insert(self.ques,ind,que)
+        self.que_buttons.insert(ind,button)
+        self.que_layout.insertWidget(ind,button)
+        button.clicked.connect(lambda: self.set_pos(que))
+    
+    def clear_cues(self):
+        for w in self.que_buttons:
+            self.que_layout.removeWidget(w)
+            w.close()
+        self.que_buttons = []
+        self.ques = np.array([],dtype=int)
+    
+    def set_pos(self,fpos):
+        self.slider.setValue(fpos)
+
+    def _pos_changed(self):
+        pos = self.slider.value()
+        self.PositionChanged.emit(pos)
+        self.inactive_time()
+
+    def inactive_time(self):
+        self.slider.blockSignals(True)
+        self._timer.start(20)
+    def inactive_end(self):
+        self.slider.blockSignals(False)
+
+
+
+class RoiTool():
+    def __init__(self,pli:pg.PlotItem):
+        self.pli = pli
+        self.roi = pg.RectROI((0,0),(100,100))
+        self.pli.addItem(self.roi)
+    def enable_roi(self,flg:bool):
+        if flg:
+            self.pli.addItem(self.roi)
+        else:
+            self.pli.removeItem(self.roi)
+    def reg_change_signal(self):
+        '''returns pyqtSignal pg.RectROI.sigRegionChangeFinished '''
+        return self.roi.sigRegionChangeFinished
+    def get_rectangle(self):
+        '''returns (x,y,w,h)'''
+        x,y = self.roi.pos()
+        w,h = self.roi.size()
+        x,y,w,h = (int(i) for i in (x,y,w,h))
+        return (x,y,w,h)
+    def set_roipos(self,x,y):
+        self.roi.setPos(x,y)
+
+
+class PropertyTextWidget(QWidget):
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.l0 = QVBoxLayout(self)
+        self.setLayout(self.l0)
+
+        self.line = QLineEdit(self)
+        self.line.setReadOnly(True)
+        self.l0.addWidget(self.line)
+
+        self.maintext = ''
+        self.bgrtext = ''
+    def _show(self):
+        self.line.setText(self.maintext+';   '+self.bgrtext)
+    def set_text(self,text):
+        self.maintext = text
+        self._show()
+    def add_bgr(self,vals):
+        '''utility method to show [B,G,R] values'''
+        self.bgrtext = f'B(H):{vals[0]:.0f}, G(S):{vals[1]:.0f}, R(V):{vals[2]:.0f}'
+        self._show()
+
+
+class FrameWidgetBase(QWidget):
+    def __init__(self,parent):
+        super().__init__(parent)
+        self._timer = QTimer()
+        self._timer.timeout.connect(self.inactive_end)
+
+    def keyPressEvent(self,e):
+        super().keyPressEvent(e)
+        self.KeyPressed.emit(e.key())
+        self.inactive_time()
+
+    def inactive_time(self):
+        self.blockSignals(True)
+        self._timer.start(10)
+    def inactive_end(self):
+        self.blockSignals(False)
+
+class ViewComposite(FrameWidgetBase):
+    KeyPressed = pyqtSignal(int)
+    def __init__(self,im_wid:ImageWidget,text_wid:PropertyTextWidget,parent=None):
+        super().__init__(parent)
+
+        self.im_wid = im_wid
+        self.text_wid = text_wid
+
+        self.l0 = QVBoxLayout()
+        self.setLayout(self.l0)
+
+        self.l0.addWidget(self.im_wid)
+        self.l0.addWidget(self.text_wid)
+    def keyPressEvent(self,e):
+        super().keyPressEvent(e)
+        self.KeyPressed.emit(e.key())
+        self.inactive_time()
+    def add_slider(self,slider:SliderWidget):
+        self.slider = slider
+        self.l0.addWidget(self.slider)
+    def acitvate_slider(self,flag:bool):
+        self.slider.setEnabled(flag)
+        if flag:
+            self.slider.show()
+        else:
+            self.slider.hide()
+
+
+
+
+
+
+
+
+
+
+class ViewerFrameConfig():
+    def __init__(self):
+        self.fast_skip = 5
+        self.ff_skip = 25
+
+class ViewerFrameBase(ABC):
+    def __init__(self):
+        self.view_c = ViewerFrameConfig()
+        self.partners = []
+
+    @abstractmethod
+    def change_fpos(self,new_fpos,from_partner=False):
+        if not from_partner:
+            for p in self.partners:
+                p.change_fpos(new_fpos,from_partner=True)
+    @abstractmethod
+    def connect_key(self):
+        pass
+    @abstractmethod
+    def disconnect_key(self):
+        pass
+
+    def link_frame(self,target):
+        '''link fpos with target'''
+        newpartners = list(set(self.partners+target.partners+[self,target]))
+        self.partners = [p for p in newpartners if p is not self]
+        target.partners = [p for p in newpartners if p is not target]
+    
+    def unlink_frame(self):
+        for p in self.partners:
+            p.partners.remove(self)
+        self.partners = []
+
+    def keyinterp(self,key):
+        if key==Qt.Key_L:
+            self.forward()
+        if key == Qt.Key_Right:
+            self.forward()
+        if key==Qt.Key_H:
+            self.backward()
+        if key == Qt.Key_Left:
+            self.backward()
+        if key == Qt.Key_K:
+            self.fastbackward()
+        if key == Qt.Key_Up:
+            self.fastbackward()
+        if key == Qt.Key_J:
+            self.fastforward()
+        if key == Qt.Key_Down:
+            self.fastforward()
+        if key == Qt.Key_F:
+            self.ffforward()
+        if key == Qt.Key_B:
+            self.ffbackward()
+    def forward(self):
+        self.change_fpos(self.fpos+1)
+    def backward(self):
+        self.change_fpos(self.fpos-1)
+    def fastforward(self):
+        self.change_fpos(self.fpos+self.view_c.fast_skip)
+    def fastbackward(self):
+        self.change_fpos(self.fpos-self.view_c.fast_skip)
+    def ffforward(self):
+        self.change_fpos(self.fpos+self.view_c.ff_skip)
+    def ffbackward(self):
+        self.change_fpos(self.fpos-self.view_c.ff_skip)
+
+
+
+class SingleViewerSetting():
+    def __init__(self):
+        self.enable_roi = True
+        self.show_roi_bgr = True
+        self.enable_slider = True
+
+class SingleViewer(ViewerFrameBase):
+    def __init__(self):
+        super().__init__()
+
+        self.ld = None
+        self.setting = SingleViewerSetting()
+
+        self.im_wid = ImageWidget()
+        self.text_wid = PropertyTextWidget()
+        self.composite = ViewComposite(self.im_wid,self.text_wid)
+
+        self.pli = self.im_wid.get_pli()
+        self.drawing = Drawing(self.pli)
+        self.roi = RoiTool(self.pli)
+
+        self.roi.reg_change_signal().connect(self.show_roi_bgr)
+
+        self.slider = SliderWidget()
+        self.slider.PositionChanged.connect(self.change_fpos)
+        self.composite.add_slider(self.slider)
+
+        self.fpos = 0
+        self.connect_key()
+
+        self.cropbox = None # for optioal crop image
+        self.cropbool = None
+
+        self.masks = None
+    
+    def set_loader(self,ld):
+        self.ld = ld
+        self.slider.set_framenum(0,self.ld.getframenum())
+    def set_masks(self,masks:list):
+        '''list of ndarray'''
+        self.masks = masks
+
+    def set_cropbox(self,box,bool_arr):
+        '''ndarray[frame,(xywh)]'''
+        self.cropbox = box
+        self.cropbool = bool_arr
+    def remove_cropbox(self):
+        self.cropbox = None
+        self.cropbool = None
+        self.im_wid.setRect() #reset rect
+
+    def connect_key(self):
+        self.composite.KeyPressed.connect(self.keyinterp)
+    def disconnect_key(self):
+        self.composite.KeyPressed.disconnect(self.keyinterp)
+
+    def get_widget(self):
+        return self.composite
+    def get_setting(self):
+        return self.setting
+    def get_drawing(self):
+        return self.drawing
+    def get_roi(self):
+        return self.roi
+    def get_fpos(self):
+        return self.fpos
+
+    def apply_setting(self):
+        s = self.setting
+        self.roi.enable_roi(s.enable_roi)
+        self.composite.acitvate_slider(s.enable_slider)
+        
+    def show_roi_bgr(self):
+        if not (self.setting.enable_roi and self.setting.show_roi_bgr):
+            return
+        (x,y,w,h) = self.roi.get_rectangle()
+        frame = self.ld.getframe(self.fpos)
+        crop = frame[y:y+h,x:x+w,:]
+        vals = np.mean(crop,axis=(0,1)).tolist()
+        self.text_wid.add_bgr(vals)
+
+    def change_fpos(self,new_fpos,from_partner=False):
+        '''try to update self.fpos to new_fpos.
+        returns True is update was successful.
+        self.fpos remains unchanged if unsuccessful.'''
+        super().change_fpos(new_fpos,from_partner)
+        if not self.ld.hasframe(new_fpos):
+            return False
+        frame = self.ld.getframe(new_fpos)
+        if self.cropbox is None:
+            self.im_wid.setcvimage(frame)
+            if not self.masks is None:
+                self.im_wid.setmask(self.masks[new_fpos])
+        elif not self.cropbool[new_fpos]:
+            return False
+        else:
+            x,y,w,h = self.cropbox[new_fpos,:]
+            crop = frame[y:y+h,x:x+w,:]
+            self.im_wid.setcvimage(crop)
+            if not self.masks is None:
+                maskcrop = self.masks[new_fpos][y:y+h,x:x+w]
+                self.im_wid.setmask(maskcrop)
+            self.im_wid.setRect(x,y,w,h)
+            self.roi.set_roipos(x,y)
+        self.drawing.update(new_fpos)
+        self.slider.set_pos(new_fpos)
+
+        self.fpos = new_fpos
+        self.text_wid.set_text(f'frame {self.fpos}')
+        self.show_roi_bgr()
+
+        return True
+
+
+
+
+class StaticPlotWidget(QWidget):
+    def __init__(self,parent=None):
+        super().__init__(parent)
+
+        self.l0 = QHBoxLayout()
+        self.setLayout(self.l0)
+
+        self.p0 = pg.PlotItem()
+        self.p0wrap = pg.PlotWidget(plotItem=self.p0)
+        self.l0.addWidget(self.p0wrap)
+
+        self.p0.showGrid(x=True,y=True,alpha=0.5)
+    
+    def get_pli(self):
+        '''return pg.PlotItem'''
+        return self.p0
+
+class StaticPlotViewer(QWidget):
+    def __init__(self):
+        self.wid = StaticPlotWidget()
+    def get_widget(self):
+        return self.wid
+    def get_pli(self):
+        '''return pg.PlotItem'''
+        return self.wid.get_pli()
+
+
+
+class FramePlotWidget(FrameWidgetBase):
+    KeyPressed = pyqtSignal(int)
+    def __init__(self,parent=None):
+        super().__init__(parent)
+
+        self.frange = [-10,10]
+
+        self.l0 = QHBoxLayout()
+        self.setLayout(self.l0)
+
+        self.p0 = pg.PlotItem()
+        self.p0wrap = pg.PlotWidget(plotItem=self.p0)
+        self.l0.addWidget(self.p0wrap)
+
+        self.fposline = self.p0.addLine(x=0,pen=dict(color=(100,100,100),width=1))
+        self.p0.setLabel('bottom','frame')
+
+    def get_pli(self):
+        '''return pg.PlotItem'''
+        return self.p0
+    def set_frange(self,offsets:list):
+        '''if fpos +- 10, offsets=[-10,10].'''
+        self.frange = offsets
+
+    def set_fpos(self,fpos):
+        self.p0.setXRange(fpos+self.frange[0],fpos+self.frange[1])
+        self.fposline.setPos(fpos)
+
+
+class FramePlotViewer(ViewerFrameBase):
+    def __init__(self):
+        super().__init__()
+        self.wid = FramePlotWidget()
+        self.connect_key()
+    
+    def connect_key(self):
+        self.wid.KeyPressed.connect(self.change_fpos)
+    def disconnect_key(self):
+        self.wid.KeyPressed.disconnect(self.change_fpos)
+
+    def change_fpos(self,new_fpos,from_partner=False):
+        super().change_fpos(new_fpos,from_partner)
+        self.wid.set_fpos(new_fpos)
+
+
+
+
+
+
+
+class ViewerSet():
+    ViewerDictionary = {
+        'single':SingleViewer,
+        'fplot':FramePlotViewer,
+        'splot':StaticPlotViewer
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.viewers = {}
+        self.wid = ViewerSetWidget()
+        self.fpos=0
+    def get_widget(self):
+        return self.wid
+    def clear_viewers(self):
+        for k,l in self.viewers.items():
+            for viewer in l:
+                viewer.get_widget().close()
+            self.viewers[k] = []
+    def generate_viewers(self,order:dict):
+        '''order is {key1:number1,key2:number2,...}'''
+        self.clear_viewers()
+        for key,number in order.items():
+            if not key in ViewerSet.ViewerDictionary.keys():
+                raise ValueError(f'key {key} is not registered')
+            self.viewers[key] = []
+            for i in range(number):
+                self.viewers[key].append(ViewerSet.ViewerDictionary[key]())
+    def get_viewers(self):
+        return self.viewers
+    def deploy(self,presetkey:str,**kwargs):
+        wid_dict = {key:[v.get_widget() for v in l] for key,l in self.viewers.items()}
+        self.wid.deploy(wid_dict,presetkey,**kwargs)
+
+
+
+class TabPreset(QWidget):
+    def __init__(self,widgets:dict,rows:dict,cols:dict,tabnames:dict,order='cols'):
+        '''basically grid preset, but change tabs when r/c is filled.'''
+        super().__init__(parent=None)
+        self.l0 = QHBoxLayout()
+        self.setLayout(self.l0)
+
+        if len(widgets)>1:
+            self.splitter = QSplitter(Qt.Horizontal)
+            self.l0.addWidget(self.splitter)
+        else:
+            # for only one category, splitter is not suitable
+            self.splitter = QHBoxLayout()
+            self.l0.addLayout(self.splitter)
+
+        for key,wids in widgets.items():
+            tab = QTabWidget()
+            self.splitter.addWidget(tab)
+            nwid = rows[key]*cols[key]
+            tabnum = len(wids)//nwid
+
+            if isinstance(order,dict):
+                o = order[key]
+            elif isinstance(order,str):
+                o = order
+            else:
+                raise TypeError(f'order {order} unexpected type')
+
+            for t in range(tabnum):
+                gw = QWidget()
+                grid = QGridLayout()
+                gw.setLayout(grid)
+                tab.addTab(gw,tabnames[key][t])
+
+                for i in range(t*nwid,(t+1)*nwid):
+                    if o=='cols':
+                        r = i//cols[key]
+                        c = i%cols[key]
+                    elif o=='rows':
+                        r = i%rows[key]
+                        c = i//rows[key]
+                    else:
+                        raise ValueError(f'order {o} unexpected')
+                    grid.addWidget(wids[i],r,c)
+
+
+class GridPreset(QWidget):
+    def __init__(self, widgets:dict, rows:dict, cols:dict, order='cols'):
+        super().__init__(parent=None)
+        self.l0 = QHBoxLayout()
+        self.setLayout(self.l0)
+
+        if len(widgets)>1:
+            self.splitter = QSplitter(Qt.Horizontal)
+            self.l0.addWidget(self.splitter)
+        else:
+            # for only one category, splitter is not suitable
+            self.splitter = QHBoxLayout()
+            self.l0.addLayout(self.splitter)
+
+        self.l1 = {}
+        for key in widgets.keys():
+            wid = QFrame(frameShape=QFrame.Panel)
+            self.l1[key] = QGridLayout()
+            wid.setLayout(self.l1[key])
+            self.splitter.addWidget(wid)
+
+        for key,wids in widgets.items():
+            if isinstance(order,dict):
+                o = order[key]
+            elif isinstance(order,str):
+                o = order
+            else:
+                raise TypeError(f'order {order} unexpected type')
+            for i,wid in enumerate(wids):
+                if o=='cols':
+                    r = i//cols[key]
+                    c = i%cols[key]
+                elif o=='rows':
+                    r = i%rows[key]
+                    c = i//rows[key]
+                else:
+                    raise ValueError(f'order {o} unexpected')
+                self.l1[key].addWidget(wid,r,c)
+
+
+class SinglePreset(QWidget):
+    def __init__(self,widgets):
+        super().__init__(parent=None)
+        self.l0 = QHBoxLayout()
+        self.setLayout(self.l0)
+        self.l0.addWidget(widgets['single'][0])
+
+
+class ViewerSetWidget(QWidget):
+    PresetDictionary = {
+        'grid':GridPreset,
+        'single':SinglePreset,
+        'tab':TabPreset
+    }
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.resize(800,800)
+
+        self.l0 = QHBoxLayout()
+        self.setLayout(self.l0)
+
+        self.current_wid = QWidget()
+        self.l0.addWidget(self.current_wid)
+
+    def deploy(self,widgets:dict,presetkey:str,**kwargs):
+        self.l0.removeWidget(self.current_wid)
+        self.current_wid.close()
+        self.current_wid = ViewerSetWidget.PresetDictionary[presetkey](widgets,**kwargs)
+        self.l0.addWidget(self.current_wid)
