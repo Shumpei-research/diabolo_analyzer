@@ -1,5 +1,8 @@
-import numpy as np
 import copy
+from typing import List
+
+import numpy as np
+import pandas as pd
 
 
 
@@ -77,21 +80,49 @@ class Knot():
         self.bf = 0 # begin frame
         self.ef = maxframe
         self.k0 = 'n' # initial knot.
-        self.p_pass = np.array([],dtype=int) # positive passthrough frames
-        self.n_pass = np.array([],dtype=int) # negative passthrough frames
         self.wrap_keys = np.array([],dtype=object) # wrap events
         self.wrap_frames = np.array([],dtype=int) # wrap frames
-    def p(self):
-        '''cumulative passthrough number (t). 
-        t = 0~self.ef (size self.ef)
-        positive passthrough counts -1.
-        negative counts 1.'''
-        p = np.zeros((self.maxframe),dtype=int)
-        for ppass in self.p_pass:
-            p[ppass:] = p[ppass:] -1
-        for npass in self.n_pass:
-            p[npass:] = p[npass:] +1
-        return p
+    def get_dict(self):
+        out = {'begin_frame':self.bf,'end_frame':self.ef,'k0':self.k0,
+            'frame':self.wrap_frames,'wrap':self.wrap_keys}
+        return out
+    def load(self,data:dict):
+        self.bf = data['begin_frame']
+        self.ef = data['end_frame']
+        self.k0 = data['k0']
+        self.wrap_frames = data['frame']
+        self.wrap_keys = data['wrap']
+    def get_clip_dict(self,new_bf,new_ef):
+        '''exports dict as if new_bf and new_ef is used.
+        useful when you wanna get only on-string frames.'''
+
+        new_k0 = self.k(new_bf)
+        ix = np.logical_and(self.wrap_frames>new_bf,self.wrap_frames<new_ef)
+        new_frames = self.wrap_frames[ix]
+        new_wrap = self.wrap_keys[ix]
+
+        out = {'begin_frame':new_bf,'end_frame':new_ef,'k0':new_k0,
+            'frame':new_frames,'wrap':new_wrap}
+        return out
+
+    def get_full_k_n(self):
+        '''
+        arr: knot(str) ndarray(maxframe)
+        narr: n (int) ndarray (maxframe)
+        '''
+        arr = np.full(self.maxframe,fill_value='')
+        narr = np.zeros(self.maxframe,dtype=int)
+        w = Wrap(self.k0)
+        arr[self.bf:self.wrap_frames[0]]=w.k
+        narr[self.bf:self.wrap_frames[0]]=w.n()
+        for ix in range(len(self.wrap_frames)-1):
+            w.ope(self.wrap_keys[ix])
+            arr[self.wrap_frames[ix]:self.wrap_frames[ix+1]] = w.k
+            narr[self.wrap_frames[ix]:self.wrap_frames[ix+1]] = w.n()
+        w.ope(self.wrap_keys[-1])
+        arr[self.wrap_frames[-1]:self.ef] = w.k
+        narr[self.wrap_frames[-1]:self.ef] = w.n()
+        return arr, narr
 
     def k(self,t):
         """returns knot state.
@@ -118,11 +149,6 @@ class Knot():
     def wrap(self,t:int,key:str):
         '''set wrap event [key] at frame [t].
         overwrites if exists already.'''
-        if key=='p':
-            if self.k(t)=='n':
-                np.append(self.p_pass,t)
-            elif self.k(t)=='m':
-                np.append(self.n_pass,t)
         if t in self.wrap_frames:
             ix = self.wrap_frames==t
             self.wrap_keys[ix]=key
@@ -136,9 +162,6 @@ class Knot():
         ix = self.wrap_frames==t
         np.delete(self.wrap_frames,ix)
         np.delete(self.wrap_keys,ix)
-
-        np.delete(self.p_pass,self.p_pass==t)
-        np.delete(self.n_pass,self.n_pass==t)
 
 
 
@@ -157,7 +180,6 @@ class OnPeriod():
         self.maxframe = a_g.shape[0] # maximum frame (total frame number)
         self.bf = 0 # begin frame
         self.ef = self.maxframe # end frame
-        self.m0 = 0 # initial nwrap
         self.knot = Knot(self.maxframe)
 
     def begin(self,t):
@@ -169,10 +191,8 @@ class OnPeriod():
     def begin_fly(self,t):
         self.bf = t
         if self.a_g[t] <= np.pi:
-            self.m0 = 0
             self.knot.k0 = 'n'
         elif self.a_g[t] > np.pi:
-            self.m0 = -1
             self.knot.k0 = 'm'
     def is_flying(self,t):
         if self.knot.k(t) == 'n' and self.a_g[t] <= np.pi:
@@ -180,23 +200,35 @@ class OnPeriod():
         elif self.knot.k(t) == 'm' and self.a_g[t] > np.pi:
             return True
         return False
+    def landing_period(self):
+        '''ndarray(bool)[frame] size:maxframe'''
+        land_array = np.logical_not(self.flying_period())
+        return land_array
+    def flying_period(self):
+        '''ndarray(bool)[frame] size:maxframe'''
+        karr,narr = self.knot.get_full_k_n()
+        fly1 = np.logical_and(karr=='n',self.a_g<=np.pi)
+        fly2 = np.logical_and(karr=='m',self.a_g>np.pi)
+        fly_array = np.logical_and(fly1,fly2)
+        return fly_array
     def set_k0(self,k0):
         '''set k0 and derive m0.
         must be called after calling begin(t)'''
         self.knot.k0 = k0
-        n = self.knot.n(self.bf)
-        self.m0 = n
     def get_knot(self,t:int):
         return self.knot.k(t)
+    def get_full_knot(self):
+        return self.knot.get_full_k_n()[0]
+
     def a(self):
         '''returns angle after correction.'''
-        self.a_g + 2*np.pi*(self.m0 + self.knot.p())
+        self.a_g + 2*np.pi*(self.knot.get_full_k_n()[1])
     def get_fly(self):
         '''returns [ndarray] frames of fly events.
         only bf < frames <= ef'''
         angle = self.a()
-        positive_fly_frame = np.nonzero(np.logical_and(angle[:-1]>np.pi, angle[1:]<np.pi))[0]+1
-        negative_fly_frame = np.nonzero(np.logical_and(angle[:-1]<-np.pi, angle[1:]>-np.pi))[0]+1
+        positive_fly_frame = np.nonzero(np.logical_and(angle[:-1]>np.pi, angle[1:]<=np.pi))[0]+1
+        negative_fly_frame = np.nonzero(np.logical_and(angle[:-1]<=-np.pi, angle[1:]>-np.pi))[0]+1
         positive_fly_frame = [pf for pf in positive_fly_frame if self.knot.k(pf)=='n']
         negative_fly_frame = [nf for nf in negative_fly_frame if self.knot.k(nf)=='m']
         fly_frame = np.sort(np.concatenate((positive_fly_frame,negative_fly_frame)))
@@ -207,16 +239,19 @@ class OnPeriod():
         '''returns [ndarray] frames of land events.
         only bf < frames <= ef'''
         angle = self.a()
-        positive_land_frame = np.nonzero(np.logical_and(angle[:-1]<np.pi, angle[1:]>np.pi))[0]+1
-        negative_land_frame = np.nonzero(np.logical_and(angle[:-1]>-np.pi, angle[1:]<-np.pi))[0]+1
+        positive_land_frame = np.nonzero(np.logical_and(angle[:-1]<=np.pi, angle[1:]>np.pi))[0]+1
+        negative_land_frame = np.nonzero(np.logical_and(angle[:-1]>-np.pi, angle[1:]<=-np.pi))[0]+1
+        # passthrough is removed by this
         positive_land_frame = [pf for pf in positive_land_frame if self.knot.k(pf)=='n']
         negative_land_frame = [nf for nf in negative_land_frame if self.knot.k(nf)=='m']
-        positive_land_frame = [pf for pf in positive_land_frame if pf not in self.knot.p_pass]
-        negative_land_frame = [nf for nf in negative_land_frame if nf not in self.knot.n_pass]
         land_frame = np.sort(np.concatenate((positive_land_frame,negative_land_frame)))
         ix = np.logical_and(land_frame>self.bf,land_frame<=self.ef)
         land_frame = land_frame[ix]
         return land_frame
+    def get_passthrough(self):
+        '''returns ndarray[frames] of passthrough'''
+        p = np.concatenate((self.knot.p_pass,self.knot.n_pass))
+        return p
     def get_wrap(self):
         '''returns [tuple(ndarray,ndarray)] frames of wrap and unwrap events.
         only bf < frames <= ef'''
@@ -229,14 +264,15 @@ class OnPeriod():
         unwrap_f = unwrap_f[unwrap_ix]
         return wrap_f, unwrap_f
     def autowrap(self,t):
-        '''auto wrap at/after t'''
+        '''auto wrap after t.
+        at t is not included.'''
         wrap_f, unwrap_f = self.get_wrap()
         for f in wrap_f:
-            if f<t:
+            if f<=t:
                 continue
             self.knot.wrap(f,'R')
         for f in unwrap_f:
-            if f<t:
+            if f<=t:
                 continue
             self.knot.wrap(f,'r')
     def get_earliest_after(self,t):
@@ -269,9 +305,8 @@ class OnPeriod():
     
     def set_wrap(self,t:int,key:str):
         self.knot.wrap(t,key)
-
-
-
+    def undo_wrap(self,t:int):
+        self.knot.undo_wrap(t)
 
 
 
@@ -315,6 +350,15 @@ class Angle():
         '''returns left,center,right.
         Note that isreverse() is not considered.'''
         return self.o1.name,self.o3.name,self.o2.name
+    def get_full_knot(self):
+        '''both flying and landing are included.
+        ndarray[frame] (str)'''
+        out = np.full(self.a_g.shape,fill_value='')
+        for op in self.on_periods:
+            karr = op.get_full_knot()
+            out[op.bf:op.ef]=karr[op.bf:op.ef]
+        return out
+
     def _calc_a_g(self):
         vec1 = self.o1.pos[self.bool] - self.o3.pos[self.bool]
         vec2 = self.o2.pos[self.bool] - self.o3.pos[self.bool]
@@ -403,14 +447,14 @@ class Angle():
             if op.ef>=t:
                 op.end(self._boolend_after(t))
     def autowrap(self,t:int):
-        '''autowrap at/after t.
+        '''autowrap after t.
         only one OnPeriod is affected.'''
         op = self.get_onperiod(t)
         op.autowrap(t)
 
     def get_earliest_after(self,t):
         '''returns earliest land/fly event frame and isfly.
-        only at/after t
+        only at/after t 
         only bf< frame <= ef
         returns -1,False if nothing'''
         if not self.ison(t):
@@ -433,6 +477,28 @@ class Angle():
     def set_wrap(self,t:int,key:str):
         op = self.get_onperiod(t)
         op.set_wrap(t,key)
+    def undo_wrap(self,t:int):
+        op = self.get_onperiod(t)
+        op.undo_wrap(t)
+    
+    def get_all_events(self):
+        '''returns ndarray of combined event frames
+        rev = ndarray[frame], True if reversed.'''
+        rev = np.zeros((self.a_g.shape[0]),dtype=bool)
+        l_f = []
+        f_f = []
+        p_f = []
+        for op in self.on_periods:
+            l_f.append(op.get_land())
+            f_f.append(op.get_fly())
+            p_f.append(op.get_passthrough())
+            if op.reverse:
+                rev[op.bf:op.ef] = True
+        
+        landing_frames = np.concatenate(l_f,axis=0)
+        flying_frames = np.concatenate(f_f,axis=0)
+        passthrough_frames = np.concatenate(p_f,axis=0)
+        return landing_frames, flying_frames, passthrough_frames, rev
 
 
 
@@ -530,12 +596,12 @@ class ObjectChain():
         self.ch_frames.append(frame)
         self.ch_chain.append({'code':'set','chain':chain,'flying':flying,'absent':absent})
     def event(self,frame,code,**kwargs):
-        '''code and kwargs for ChainState.ope method
-        frame must be the latest or tied latest'''
+        '''code and kwargs for ChainState.ope method'''
         if any([f>frame for f in self.ch_frames]):
             raise ValueError(f'{frame} is not the latest')
-        self.ch_frames.append(frame)
-        self.ch_chain.append({'code':code}.update(kwargs))
+        ix = np.searchsorted(self.ch_frames,frame,side='right')
+        self.ch_frames.insert(ix,frame)
+        self.ch_chain.insert(ix,{'code':code}.update(kwargs))
     def clear_after(self,frame):
         '''clear at/after frame'''
         ix = np.nonzero(np.array(self.ch_frames)<frame)[0]
@@ -547,8 +613,23 @@ class ObjectChain():
         for i,f in self.ch_frames:
             if f>frame:
                 return out
-            out.ope(**self.ch_event[i])
+            out.ope(**self.ch_chain[i])
         return out
+    def get_changedict(self) -> dict:
+        out = {'frame':self.ch_frames,'change':self.ch_chain}
+        return out
+    def load(self,datadict:dict):
+        self.ch_frames = datadict['frame']
+        self.ch_chain = datadict['change']
+    def get_csdict(self):
+        '''frame:list , csdict:list '''
+        cs = ChainState()
+        csdictlist = []
+        for ch in self.ch_chain:
+            cs.ope(**ch)
+            csdictlist.append(cs.todict())
+        return self.ch_frames,csdictlist
+
 
 
 
@@ -592,6 +673,55 @@ class AngleSet():
                 alist.append(a)
                 revlist.append(a.isreverse())
         return alist, revlist
+    def get_all_events(self):
+        '''
+        land_df: DataFrame, {'frame':[],'l':[],'r':[],'c':[]}
+        fly_df: same
+        pass_df: same
+        '''
+        land_events = {'frame':[],'l':[],'r':[],'c':[]}
+        fly_events = {'frame':[],'l':[],'r':[],'c':[]}
+        passthrough_events = {'frame':[],'l':[],'r':[],'c':[]}
+        for a in self.angles:
+            land,fly,passthrough,rev = a.get_all_events()
+            l,center,r = a.get_names()
+            for i in land:
+                if rev[i]:
+                    left = r
+                    right = l
+                else:
+                    left = l
+                    right = r
+                land_events['frame'].append(i)
+                land_events['l'].append(left)
+                land_events['r'].append(right)
+                land_events['c'].append(center)
+            for i in fly:
+                if rev[i]:
+                    left = r
+                    right = l
+                else:
+                    left = l
+                    right = r
+                fly_events['frame'].append(i)
+                fly_events['l'].append(left)
+                fly_events['r'].append(right)
+                fly_events['c'].append(center)
+            for i in passthrough:
+                if rev[i]:
+                    left = r
+                    right = l
+                else:
+                    left = l
+                    right = r
+                passthrough_events['frame'].append(i)
+                passthrough_events['l'].append(left)
+                passthrough_events['r'].append(right)
+                passthrough_events['c'].append(center)
+        pass_df = pd.DataFrame.from_dict(passthrough_events)
+        fly_df = pd.DataFrame.from_dict(fly_events)
+        land_df = pd.DataFrame.from_dict(land_events)
+        return land_df,fly_df,pass_df
 
 
 
@@ -712,21 +842,38 @@ class ChainAssigner():
             aa,arev = self.angleset.get(l,c,rto)
         k0 = ba.get_knot(t)
         aa.begin(t,k0,arev)
+    
+    def set_dissapear(self):
+        '''set disappear event automatically using bool array of OneObject.
+        Only ObjectChain will be modified. AngleSet will be unchanged.
+        Dissapear event must be from flying state. Dissapearance of on-string object
+        is irregular, and the following angle behavior will not be followed.'''
+        for st in self.sticks:
+            end = 1+np.argmax(np.nonzero(st.bool)[0])
+            self.objectchain.event(end,'dis',key=st.name)
+        for d in self.dias:
+            end = 1+np.argmax(np.nonzero(d.bool)[0])
+            self.objectchain.event(end,'dis',key=d.name)
 
     def search_forward(self,t):
-        '''at/after t, autowrap, search earliest fly/land event,
+        '''after t (not at t) autowrap, after/at t search earliest fly/land event,
         rearrenge Angle,
-        then repeat these steps until no event is found.'''
+        then repeat these steps until no event is found.
+        fly event (t) will not be recaptured by serarch(t), 
+        since OnEvent is refreshed at t (new OnEvent with bf=t).
+        fly at OnEvent.ef will not be reported again by Angle.'''
         angles,reverse_list = self.angleset.get_on(t)
         if len(angles)==0:
+            self.set_dissapear()
             return
         earl_frame = np.zeros((len(angles)),dtype=int)
         isfly = np.zeros((len(angles)),dtype=bool)
         for i,a in enumerate(angles):
-            a.autowarp(t)
+            a.autowrap(t)
             earl_frame[i],isfly[i] = a.get_earliest_after(t)
         
         if np.all(earl_frame==-1):
+            self.set_dissapear()
             return
 
         fmin = np.min(earl_frame)
@@ -743,12 +890,13 @@ class ChainAssigner():
             else:
                 self._land(t,c,l,r)
 
-        self.search_forward(fmin+1)
+        self.search_forward(fmin)
 
     def set_wrap(self,t,key,wrap_key):
         '''Set wrap at t to Angle[anglekey],
         clear begin/end events at/after t for every Angle,
-        call search_forward(t)
+        call search_forward(t).
+        If passthrough, it cancels the landing at t.
         '''
         angles,revlist = self.angleset.get_on(t)
         for a in angles:
@@ -763,7 +911,67 @@ class ChainAssigner():
         self.objectchain.clear_after(t)
         
         self.search_forward(t)
+    
+    def undo_wrap(self,t,key):
+        '''undo wrap at t to Angle[anglekey],
+        clear begin/end events at/after t for every Angle,
+        call search_forward(t).
+        If passthrough, it induces the landing at t.
+        '''
+        angles,revlist = self.angleset.get_on(t)
+        for a in angles:
+            if key != a.get_names()[1]:
+                continue
+            if not a.is_just_landing(t):
+                continue
+            a.undo_wrap(t)
+        
+        for a in angles:
+            a.clear_after(t)
+        self.objectchain.clear_after(t)
+        
+        self.search_forward(t)
+
+    
+    def get(self):
+        """[summary]
+
+        Returns:
+            cs_frame [list[int]]: chain state change event frames
+            cs_dict [list[dict[str:list[str]]]]: chain state ['chain','flying','absent]
+            land_df [DataFrame]: land events ['frame','l','c','r']
+            fly_df [DataFrame]: fly events ['frame','l','c','r']
+            pass_df [DataFrame]: passthrough events ['frame','l','c','r']
+            knot [dict[str:ndarray[str (frames)]]]: all knot ('d0','d1',...)
+        """
+        cs_frame, cs_dict = self.objectchain.get_csdict()
+
+        land_df,fly_df,pass_df = self.angleset.get_all_events()
+
+        knot = {}
+        for d in self.dias:
+            knot[d.name] = np.full((self.framenum),fill_value='')
+
+        for i in range(len(cs_frame)):
+            bf = cs_frame[i]
+            if i<len(cs_frame)-1:
+                ef = cs_frame[i+1]
+            else:
+                ef = self.framenum
+
+            chain = cs_dict[i]['chain']
+            if len(chain)<3:
+                continue
+            for l,c,r in zip(chain[:-2],chain[1:-1],chain[2:]):
+                a,rev = self.angleset.get(l,c,r)
+                k = a.get_full_knot()
+                knot[c][bf:ef] = k[bf:ef]
+
+        return cs_frame, cs_dict, land_df, fly_df, pass_df, knot
 
 
 
 
+
+# Position Bool must be continuous without blank frames. (except for begining and ending)
+# This requirements should be equipped within Tracking/Circle/Smoothing operation.
