@@ -102,9 +102,9 @@ class Knot():
         n_pass = []
         for i in ix:
             if self.k(i)=='m':
-                p_pass.append(i)
+                p_pass.append(self.wrap_frames[i])
             elif self.k(i)=='n':
-                n_pass.append(i)
+                n_pass.append(self.wrap_frames[i])
         return p_pass,n_pass
     def get_clip_dict(self,new_bf,new_ef):
         '''exports dict as if new_bf and new_ef is used.
@@ -173,7 +173,7 @@ class Knot():
             return
         ix = self.wrap_frames==t
         self.wrap_frames = np.delete(self.wrap_frames,ix)
-        self.wrap_frames = np.delete(self.wrap_keys,ix)
+        self.wrap_keys = np.delete(self.wrap_keys,ix)
 
 
 
@@ -231,6 +231,8 @@ class OnPeriod():
         return self.knot.k(t)
     def get_full_knot(self):
         return self.knot.get_full_k_n()[0]
+    def get_wraps(self):
+        return self.knot.wrap_frames, self.knot.wrap_keys
 
     def a(self):
         '''returns angle after correction.'''
@@ -370,6 +372,14 @@ class Angle():
             karr = op.get_full_knot()
             out[op.bf:op.ef]=karr[op.bf:op.ef]
         return out
+    def get_wraps(self):
+        frames = np.array([],dtype=int)
+        wraps = np.array([],dtype=object)
+        for op in self.on_periods:
+            frames_op,wraps_op = op.get_wraps()
+            frames = np.append(frames,frames_op)
+            wraps = np.append(wraps,wraps_op)
+        return frames,wraps
 
     def _calc_a_g(self):
         vec1 = self.o1.pos[self.bool] - self.o3.pos[self.bool]
@@ -916,7 +926,7 @@ class ChainAssigner():
             self.set_dissapear()
             return
 
-        fmin = np.min(earl_frame)
+        fmin = np.min(earl_frame[earl_frame!=-1])
         indeces = np.nonzero(earl_frame==fmin)[0]
         for ix in indeces:
             a=angles[ix]
@@ -942,14 +952,13 @@ class ChainAssigner():
         for a in angles:
             if key != a.get_names()[1]:
                 continue
-            if not a.is_just_landing(t):
-                continue
             a.set_wrap(t,wrap_key)
         
         for a in angles:
             a.clear_after(t)
         self.objectchain.clear_after(t)
         
+        self.check_oneframe(t)
         self.search_forward(t)
     
     def undo_wrap(self,t,key):
@@ -962,16 +971,42 @@ class ChainAssigner():
         for a in angles:
             if key != a.get_names()[1]:
                 continue
-            if not a.is_just_landing(t):
-                continue
             a.undo_wrap(t)
         
         for a in angles:
             a.clear_after(t)
         self.objectchain.clear_after(t)
         
+        self.check_oneframe(t)
         self.search_forward(t)
 
+    def check_oneframe(self,t):
+        angles,reverse_list = self.angleset.get_on(t)
+        if len(angles)==0:
+            return
+        earl_frame = np.zeros((len(angles)),dtype=int)
+        isfly = np.zeros((len(angles)),dtype=bool)
+        for i,a in enumerate(angles):
+            earl_frame[i],isfly[i] = a.get_earliest_after(t-1)
+        
+        if np.all(earl_frame==-1):
+            return
+
+        fmin = np.min(earl_frame[earl_frame!=-1])
+        if fmin!=t:
+            return
+        indeces = np.nonzero(earl_frame==fmin)[0]
+        for ix in indeces:
+            a=angles[ix]
+            l,c,r = a.get_names()
+            if reverse_list[ix]:
+                temp = l
+                l = r
+                r = temp
+            if isfly[ix]:
+                self._fly(fmin,c,l,r)
+            else:
+                self._land(fmin,c,l,r)
     
     def get(self):
         """[summary]
@@ -983,14 +1018,17 @@ class ChainAssigner():
             fly_df [DataFrame]: fly events ['frame','l','c','r']
             pass_df [DataFrame]: passthrough events ['frame','l','c','r']
             knot [dict[str:ndarray[str (frames)]]]: all knot ('d0','d1',...)
+            wrap [{'key':{'frame':[int],'wrap':[str]}}]: wrap events for each key
         """
         cs_frame, cs_dict = self.objectchain.get_csdict()
 
         land_df,fly_df,pass_df = self.angleset.get_all_events()
 
         knot = {}
+        wraps = {}
         for d in self.dias:
             knot[d.name] = np.full((self.framenum),fill_value='',dtype=object)
+            wraps[d.name] = {'frame':[],'wrap':[]}
 
         for i in range(len(cs_frame)):
             bf = cs_frame[i]
@@ -1006,8 +1044,12 @@ class ChainAssigner():
                 a,rev = self.angleset.get(l,c,r)
                 k = a.get_full_knot()
                 knot[c][bf:ef] = k[bf:ef]
+                f,w = a.get_wraps()
+                boolix = np.logical_and(bf<=f,f<ef)
+                wraps[c]['frame'] += (f[boolix].tolist())
+                wraps[c]['wrap'] += (w[boolix].tolist())
 
-        return cs_frame, cs_dict, land_df, fly_df, pass_df, knot
+        return cs_frame, cs_dict, land_df, fly_df, pass_df, knot, wraps
 
 
 
@@ -1021,6 +1063,7 @@ class ChainAssigner():
 class ChainWidget(QWidget):
     InitSignal = pyqtSignal(dict)
     AppearSignal = pyqtSignal(dict)
+    WrapSignal = pyqtSignal(dict)
 
     def __init__(self,parent=None):
         super().__init__(parent)
@@ -1062,8 +1105,20 @@ class ChainWidget(QWidget):
         self.appear_form_layout.addRow('knot',self.appear_knot_line)
         self.appear_form_layout.addWidget(self.appear_enter)
 
+        wrap_wid = QWidget()
+        self.wrap_form_layout = QFormLayout(wrap_wid)
+        self.wrap_key_combo = QComboBox()
+        self.wrap_combo = QComboBox()
+        self.wrap_enter = QPushButton('enter')
+        self.wrap_enter.clicked.connect(self._emit_wrap)
+        self.wrap_combo.addItems(['R','L','r','l','p','delete'])
+        self.wrap_form_layout.addRow('key',self.wrap_key_combo)
+        self.wrap_form_layout.addRow('wrap',self.wrap_combo)
+        self.wrap_form_layout.addWidget(self.wrap_enter)
+
         tab.addTab(ini_wid,'initial chain')
         tab.addTab(appear_wid,'appear event')
+        tab.addTab(wrap_wid,'wrap editor')
         self.l0.addWidget(tab)
 
         self.fin_button=QPushButton('finish')
@@ -1083,6 +1138,8 @@ class ChainWidget(QWidget):
         for n in self.object_names:
             self.key_combo.addItem(n)
             self.left_combo.addItem(n)
+            if n not in ['l','r']:
+                self.wrap_key_combo.addItem(n)
 
     def _emit_init(self):
         def clean_split(s):
@@ -1105,9 +1162,18 @@ class ChainWidget(QWidget):
         knot = self.appear_knot_line.text()
         self.AppearSignal.emit({'frame':frame,'key':key,
             'isfly':isfly,'left':left,'knot':knot})
+
+    def _emit_wrap(self):
+        frame = int(self.frame_line.text())
+        key = self.wrap_key_combo.currentText()
+        wrap = self.wrap_combo.currentText()
+        self.WrapSignal.emit({'frame':frame,'key':key,'wrap':wrap})
     
     def finish_signal(self):
         return self.fin_button.clicked
+    
+    def set_fpos(self,fpos):
+        self.frame_line.setText(str(fpos))
 
 
 
@@ -1149,6 +1215,8 @@ class ChainOperation(Operation):
         self.drawing.set_wrap(knotdict,posdict,vis=True)
         self.drawing.set_string(chain,posdict)
 
+        self.slider = self.viewer.get_slider()
+
         self.viewer.change_fpos(0)
 
         self.wid.set_object_names(list(self.posdict.keys()))
@@ -1163,6 +1231,9 @@ class ChainOperation(Operation):
 
         self.wid.InitSignal.connect(self._parse_init)
         self.wid.AppearSignal.connect(self._parse_appear)
+        self.wid.WrapSignal.connect(self._parse_wrap)
+        self.viewer.frame_changed_signal().connect(self.wid.set_fpos)
+        self.viewer.change_fpos(self.viewer.get_fpos())
     
     def _parse_init(self,input_data:dict):
         self.calc.set_initial_chain(**input_data)
@@ -1176,15 +1247,34 @@ class ChainOperation(Operation):
                 input_data['left'],input_data['knot'])
         self._visualize_data()
         
+    def _parse_wrap(self,input_data:dict):
+        if input_data['wrap']=='delete':
+            self.calc.undo_wrap(input_data['frame'],input_data['key'])
+        else:
+            self.calc.set_wrap(input_data['frame'],input_data['key'],input_data['wrap'])
+        self._visualize_data()
+
     def get_widget(self):
         return self.wid
     def post_finish(self):
-        pass
+        self.wid.InitSignal.disconnect(self._parse_init)
+        self.wid.AppearSignal.disconnect(self._parse_appear)
+        self.wid.WrapSignal.disconnect(self._parse_wrap)
+        self.viewer.frame_changed_signal().disconnect(self.wid.set_fpos)
+
+        cs_frame, cs_dict, land_df, fly_df, pass_df, knot, wraps = self.calc.get()
+        int_cs_frame = [int(i) for i in cs_frame]
+        oc_dict = {'frame':int_cs_frame,'change':cs_dict}
+        knot_dict = {k:arr.tolist() for k,arr in knot.items()}
+        res_dict = {'object_chain':oc_dict,'knot':knot_dict}
+        unit = self.res.get_unit('chain_knot')
+        unit.set(res_dict)
+
     def finish_signal(self):
         return self.wid.finish_signal()
     
     def _visualize_data(self):
-        cs_frame, cs_dict, land_df, fly_df, pass_df, knot = self.calc.get()
+        cs_frame, cs_dict, land_df, fly_df, pass_df, knot, wraps = self.calc.get()
         chain = [[] for i in range(self.ld.getframenum())]
         for f,fnext,cs in zip(cs_frame,cs_frame[1:]+[self.ld.getframenum()],cs_dict):
             chain[f:fnext] = [cs['chain'] for i in range(f,fnext)]
@@ -1192,8 +1282,24 @@ class ChainOperation(Operation):
         
         self.drawing.set_wrap(knot,self.posdict,vis=True)
 
+        self.slider.clear_ques()
+        for i in range(land_df.shape[0]):
+            fr = land_df['frame'][i]
+            lab = 'land '+land_df['c'][i]
+            self.slider.add_que(fr,lab)
+        for i in range(fly_df.shape[0]):
+            fr = fly_df['frame'][i]
+            lab = 'fly '+fly_df['c'][i]
+            self.slider.add_que(fr,lab)
+        for i in range(pass_df.shape[0]):
+            fr = pass_df['frame'][i]
+            lab = 'pass '+pass_df['c'][i]
+            self.slider.add_que(fr,lab)
+        for name,cont in wraps.items():
+            for frame,wrap_key in zip(cont['frame'],cont['wrap']):
+                lab = wrap_key + ' ' + name
+                self.slider.add_que(frame,lab)
+
+        self.viewer.change_fpos(self.viewer.get_fpos())
 
 
-
-
-# to write wrap and undo_wrap functions.
