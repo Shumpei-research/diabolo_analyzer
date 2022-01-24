@@ -3,7 +3,11 @@ from typing import List
 
 import numpy as np
 import pandas as pd
+from PyQt5.QtWidgets import (QWidget, QFormLayout, QVBoxLayout, QLineEdit, QComboBox,
+QCheckBox,QHBoxLayout,QLabel,QPushButton,QTabWidget)
+from PyQt5.QtCore import pyqtSignal
 
+from operation_base import Operation
 
 
 
@@ -92,6 +96,16 @@ class Knot():
         self.k0 = data['k0']
         self.wrap_frames = data['frame']
         self.wrap_keys = data['wrap']
+    def get_passthrough(self):
+        ix = np.nonzero(self.wrap_keys=='p')[0]
+        p_pass = []
+        n_pass = []
+        for i in ix:
+            if self.k(i)=='m':
+                p_pass.append(i)
+            elif self.k(i)=='n':
+                n_pass.append(i)
+        return p_pass,n_pass
     def get_clip_dict(self,new_bf,new_ef):
         '''exports dict as if new_bf and new_ef is used.
         useful when you wanna get only on-string frames.'''
@@ -110,18 +124,16 @@ class Knot():
         arr: knot(str) ndarray(maxframe)
         narr: n (int) ndarray (maxframe)
         '''
-        arr = np.full(self.maxframe,fill_value='')
+        arr = np.full(self.maxframe,fill_value='',dtype=object)
         narr = np.zeros(self.maxframe,dtype=int)
         w = Wrap(self.k0)
-        arr[self.bf:self.wrap_frames[0]]=w.k
-        narr[self.bf:self.wrap_frames[0]]=w.n()
-        for ix in range(len(self.wrap_frames)-1):
-            w.ope(self.wrap_keys[ix])
-            arr[self.wrap_frames[ix]:self.wrap_frames[ix+1]] = w.k
-            narr[self.wrap_frames[ix]:self.wrap_frames[ix+1]] = w.n()
-        w.ope(self.wrap_keys[-1])
-        arr[self.wrap_frames[-1]:self.ef] = w.k
-        narr[self.wrap_frames[-1]:self.ef] = w.n()
+
+        frame_set = [self.bf]+self.wrap_frames.tolist()+[self.ef]
+        for ix,(f,nf) in enumerate(zip(frame_set[:-1],frame_set[1:])):
+            if ix>0:
+                w.ope(self.wrap_keys[ix-1])
+            arr[f:nf]=w.k
+            narr[f:nf]=w.n()
         return arr, narr
 
     def k(self,t):
@@ -154,14 +166,14 @@ class Knot():
             self.wrap_keys[ix]=key
             return
         ix = np.searchsorted(self.wrap_frames,t)
-        np.insert(self.wrap_frames,ix,t)
-        np.insert(self.wrap_keys,ix,key)
+        self.wrap_frames = np.insert(self.wrap_frames,ix,t)
+        self.wrap_keys = np.insert(self.wrap_keys,ix,key)
     def undo_wrap(self,t:int):
         if not t in self.wrap_frames:
             return
         ix = self.wrap_frames==t
-        np.delete(self.wrap_frames,ix)
-        np.delete(self.wrap_keys,ix)
+        self.wrap_frames = np.delete(self.wrap_frames,ix)
+        self.wrap_frames = np.delete(self.wrap_keys,ix)
 
 
 
@@ -222,16 +234,16 @@ class OnPeriod():
 
     def a(self):
         '''returns angle after correction.'''
-        self.a_g + 2*np.pi*(self.knot.get_full_k_n()[1])
+        return self.a_g + 2*np.pi*(self.knot.get_full_k_n()[1])
     def get_fly(self):
         '''returns [ndarray] frames of fly events.
         only bf < frames <= ef'''
         angle = self.a()
         positive_fly_frame = np.nonzero(np.logical_and(angle[:-1]>np.pi, angle[1:]<=np.pi))[0]+1
         negative_fly_frame = np.nonzero(np.logical_and(angle[:-1]<=-np.pi, angle[1:]>-np.pi))[0]+1
-        positive_fly_frame = [pf for pf in positive_fly_frame if self.knot.k(pf)=='n']
-        negative_fly_frame = [nf for nf in negative_fly_frame if self.knot.k(nf)=='m']
-        fly_frame = np.sort(np.concatenate((positive_fly_frame,negative_fly_frame)))
+        positive_fly_frame = np.array([pf for pf in positive_fly_frame if self.knot.k(pf)=='n'],dtype=int)
+        negative_fly_frame = np.array([nf for nf in negative_fly_frame if self.knot.k(nf)=='m'],dtype=int)
+        fly_frame = np.sort(np.concatenate((positive_fly_frame,negative_fly_frame),dtype=int))
         ix = np.logical_and(fly_frame>self.bf,fly_frame<=self.ef)
         fly_frame = fly_frame[ix]
         return fly_frame
@@ -242,15 +254,15 @@ class OnPeriod():
         positive_land_frame = np.nonzero(np.logical_and(angle[:-1]<=np.pi, angle[1:]>np.pi))[0]+1
         negative_land_frame = np.nonzero(np.logical_and(angle[:-1]>-np.pi, angle[1:]<=-np.pi))[0]+1
         # passthrough is removed by this
-        positive_land_frame = [pf for pf in positive_land_frame if self.knot.k(pf)=='n']
-        negative_land_frame = [nf for nf in negative_land_frame if self.knot.k(nf)=='m']
-        land_frame = np.sort(np.concatenate((positive_land_frame,negative_land_frame)))
+        positive_land_frame = np.array([pf for pf in positive_land_frame if self.knot.k(pf)=='n'],dtype=int)
+        negative_land_frame = np.array([nf for nf in negative_land_frame if self.knot.k(nf)=='m'],dtype=int)
+        land_frame = np.sort(np.concatenate((positive_land_frame,negative_land_frame),dtype=int))
         ix = np.logical_and(land_frame>self.bf,land_frame<=self.ef)
         land_frame = land_frame[ix]
         return land_frame
     def get_passthrough(self):
         '''returns ndarray[frames] of passthrough'''
-        p = np.concatenate((self.knot.p_pass,self.knot.n_pass))
+        p = np.concatenate((self.knot.get_passthrough())).astype(int)
         return p
     def get_wrap(self):
         '''returns [tuple(ndarray,ndarray)] frames of wrap and unwrap events.
@@ -353,7 +365,7 @@ class Angle():
     def get_full_knot(self):
         '''both flying and landing are included.
         ndarray[frame] (str)'''
-        out = np.full(self.a_g.shape,fill_value='')
+        out = np.full(self.a_g.shape,fill_value='',dtype=object)
         for op in self.on_periods:
             karr = op.get_full_knot()
             out[op.bf:op.ef]=karr[op.bf:op.ef]
@@ -454,13 +466,13 @@ class Angle():
 
     def get_earliest_after(self,t):
         '''returns earliest land/fly event frame and isfly.
-        only at/after t 
+        only after (not at) t 
         only bf< frame <= ef
         returns -1,False if nothing'''
         if not self.ison(t):
             raise ValueError(f'not on at {t}')
         op = self.get_onperiod(t)
-        return op.get_earliest_after(t)
+        return op.get_earliest_after(t+1)
     
     def is_just_landing(self,t):
         '''return if just landing at t.
@@ -485,9 +497,9 @@ class Angle():
         '''returns ndarray of combined event frames
         rev = ndarray[frame], True if reversed.'''
         rev = np.zeros((self.a_g.shape[0]),dtype=bool)
-        l_f = []
-        f_f = []
-        p_f = []
+        l_f = [np.array([],dtype=int)]
+        f_f = [np.array([],dtype=int)]
+        p_f = [np.array([],dtype=int)]
         for op in self.on_periods:
             l_f.append(op.get_land())
             f_f.append(op.get_fly())
@@ -528,9 +540,9 @@ class ChainState():
         elif code=='dis':
             self.disappear(**kwargs)
     def set(self,chain:list,flying:list,absent:list):
-        self.chain = chain
-        self.flying = flying
-        self.absent = absent
+        self.chain[:] = chain
+        self.flying[:] = flying
+        self.absent[:] = absent
     def land(self,key,left):
         '''left: left side of key. (right-hand side).'''
         if not key in self.flying:
@@ -573,7 +585,9 @@ class ChainState():
             return
         raise ValueError(f'{key} not in chain nor flying')
     def todict(self):
-        return {'chain':self.chain,'flying':self.flying,'absent':self.absent}
+        return {'chain':copy.deepcopy(self.chain),
+            'flying':copy.deepcopy(self.flying),
+            'absent':copy.deepcopy(self.absent)}
     def fromdict(self,data:dict):
         self.chain = data['chain']
         self.flying = data['flying']
@@ -601,7 +615,9 @@ class ObjectChain():
             raise ValueError(f'{frame} is not the latest')
         ix = np.searchsorted(self.ch_frames,frame,side='right')
         self.ch_frames.insert(ix,frame)
-        self.ch_chain.insert(ix,{'code':code}.update(kwargs))
+        dic = {'code':code}
+        dic.update(kwargs)
+        self.ch_chain.insert(ix,dic)
     def clear_after(self,frame):
         '''clear at/after frame'''
         ix = np.nonzero(np.array(self.ch_frames)<frame)[0]
@@ -610,7 +626,7 @@ class ObjectChain():
         
     def get_chainstate(self,frame) -> ChainState:
         out = ChainState()
-        for i,f in self.ch_frames:
+        for i,f in enumerate(self.ch_frames):
             if f>frame:
                 return out
             out.ope(**self.ch_chain[i])
@@ -644,7 +660,7 @@ class AngleSet():
             raise ValueError('right stick id must be 0')
         if self.sticks[1].object_id!=ndia+1:
             raise ValueError('right stick id must be ndia+1')
-        for i,d in self.diabolos:
+        for i,d in enumerate(self.diabolos):
             if d.object_id !=i+1:
                 raise ValueError('diabolo id not consistent')
 
@@ -652,7 +668,11 @@ class AngleSet():
         olist = [self.sticks[0]]+self.diabolos+[self.sticks[1]]
         for d in self.diabolos:
             for lp,left in enumerate(olist[:-1]):
+                if d is left:
+                    continue
                 for right in olist[lp+1:]:
+                    if d is right:
+                        continue
                     self.angles.append(Angle(left,right,d))
     def get(self,l,c,r):
         '''l,c,r: names of objects
@@ -671,7 +691,7 @@ class AngleSet():
         for a in self.angles:
             if a.ison(frame):
                 alist.append(a)
-                revlist.append(a.isreverse())
+                revlist.append(a.isreverse(frame))
         return alist, revlist
     def get_all_events(self):
         '''
@@ -753,7 +773,7 @@ class ChainAssigner():
         self.angleset = AngleSet(self.dias,self.sticks)
     
     def set_initial_chain(self,frame,chain,knots,flying,absent):
-        '''chain must be ['r',...,'l']. knots must be consisten order like ['nR','n']'''
+        '''chain must be ['r',...,'l']. knots must be consistent order like ['nR','n']'''
         self.objectchain.initialize(frame,chain,flying,absent)
         for k,l,c,r in zip(knots,chain[:-2],chain[1:-1],chain[2:]):
             angle,reverse = self.angleset.get(l,c,r)
@@ -762,15 +782,29 @@ class ChainAssigner():
             for l,r in zip(chain[:-1],chain[1:]):
                 angle,reverse = self.angleset.get(l,f,r)
                 angle.begin_fly(frame,reverse)
+        
+        self.search_forward(frame)
     
     def appear_fly(self,frame,key):
+        angles,revlist = self.angleset.get_on(frame)
+        for a in angles:
+            a.clear_after(frame)
+        self.objectchain.clear_after(frame)
+
         self.objectchain.event(frame,'appf',key=key)
         chain = self.objectchain.get_chainstate(frame).chain
         for l,r in zip(chain[:-1],chain[1:]):
-            angle,reverse = self.angleset.get(l,r,key)
+            angle,reverse = self.angleset.get(l,key,r)
             angle.begin_fly(frame,reverse)
+
+        self.search_forward(frame)
     
     def appear_land(self,frame,key,left,knot):
+        angles,revlist = self.angleset.get_on(frame)
+        for a in angles:
+            a.clear_after(frame)
+        self.objectchain.clear_after(frame)
+
         self.objectchain.event(frame,'appl',key=key,left=left)
         cs = self.objectchain.get_chainstate(frame)
         chain = cs.chain
@@ -788,10 +822,12 @@ class ChainAssigner():
             a,reverse = self.angleset.get(key,f,chain[ix+1])
             a.begin_fly(frame,reverse)
 
+        self.search_forward(frame)
+
     def _fly(self,frame,key,left,right):
         chain = self.objectchain.get_chainstate(frame).chain
         for l,r in zip(chain[:-1],chain[1:]):
-            if l==left and r==right:
+            if l==left or r==right:
                 continue
             angle,reverse = self.angleset.get(l,key,r)
             angle.begin_fly(frame,reverse)
@@ -850,13 +886,17 @@ class ChainAssigner():
         is irregular, and the following angle behavior will not be followed.'''
         for st in self.sticks:
             end = 1+np.argmax(np.nonzero(st.bool)[0])
+            if st.name in self.objectchain.get_chainstate(end).absent:
+                continue
             self.objectchain.event(end,'dis',key=st.name)
         for d in self.dias:
             end = 1+np.argmax(np.nonzero(d.bool)[0])
+            if d.name in self.objectchain.get_chainstate(end).absent:
+                continue
             self.objectchain.event(end,'dis',key=d.name)
 
     def search_forward(self,t):
-        '''after t (not at t) autowrap, after/at t search earliest fly/land event,
+        '''after t (not at t) autowrap, after (not at) t search earliest fly/land event,
         rearrenge Angle,
         then repeat these steps until no event is found.
         fly event (t) will not be recaptured by serarch(t), 
@@ -886,9 +926,9 @@ class ChainAssigner():
                 l = r
                 r = temp
             if isfly[ix]:
-                self._fly(t,c,l,r)
+                self._fly(fmin,c,l,r)
             else:
-                self._land(t,c,l,r)
+                self._land(fmin,c,l,r)
 
         self.search_forward(fmin)
 
@@ -938,7 +978,7 @@ class ChainAssigner():
 
         Returns:
             cs_frame [list[int]]: chain state change event frames
-            cs_dict [list[dict[str:list[str]]]]: chain state ['chain','flying','absent]
+            cs_dict [list[dict[str:list[str]]]]: chain state ['chain','flying','absent']
             land_df [DataFrame]: land events ['frame','l','c','r']
             fly_df [DataFrame]: fly events ['frame','l','c','r']
             pass_df [DataFrame]: passthrough events ['frame','l','c','r']
@@ -950,7 +990,7 @@ class ChainAssigner():
 
         knot = {}
         for d in self.dias:
-            knot[d.name] = np.full((self.framenum),fill_value='')
+            knot[d.name] = np.full((self.framenum),fill_value='',dtype=object)
 
         for i in range(len(cs_frame)):
             bf = cs_frame[i]
@@ -975,3 +1015,185 @@ class ChainAssigner():
 
 # Position Bool must be continuous without blank frames. (except for begining and ending)
 # This requirements should be equipped within Tracking/Circle/Smoothing operation.
+
+
+
+class ChainWidget(QWidget):
+    InitSignal = pyqtSignal(dict)
+    AppearSignal = pyqtSignal(dict)
+
+    def __init__(self,parent=None):
+        super().__init__(parent)
+
+        self.l0 = QVBoxLayout(self)
+        hb = QHBoxLayout()
+        hb.addWidget(QLabel('frame'))
+        self.frame_line = QLineEdit()
+        hb.addWidget(self.frame_line)
+        self.l0.addLayout(hb)
+
+        tab = QTabWidget()
+
+        ini_wid = QWidget()
+        self.ini_form_layout = QFormLayout(ini_wid)
+        self.absent_line = QLineEdit()
+        self.flying_line = QLineEdit()
+        self.chain_line = QLineEdit()
+        self.knot_line = QLineEdit()
+        self.ini_enter = QPushButton('enter')
+        self.ini_enter.clicked.connect(self._emit_init)
+        self.ini_form_layout.addRow('absent',self.absent_line)
+        self.ini_form_layout.addRow('flying',self.flying_line)
+        self.ini_form_layout.addRow('chain',self.chain_line)
+        self.ini_form_layout.addRow('knot',self.knot_line)
+        self.ini_form_layout.addWidget(self.ini_enter)
+
+        appear_wid = QWidget()
+        self.appear_form_layout = QFormLayout(appear_wid)
+        self.key_combo = QComboBox()
+        self.isfly_check = QCheckBox()
+        self.left_combo = QComboBox()
+        self.appear_knot_line = QLineEdit()
+        self.appear_enter = QPushButton('enter')
+        self.appear_enter.clicked.connect(self._emit_appear)
+        self.appear_form_layout.addRow('key',self.key_combo)
+        self.appear_form_layout.addRow('is flying',self.isfly_check)
+        self.appear_form_layout.addRow('key at left (r hand)',self.left_combo)
+        self.appear_form_layout.addRow('knot',self.appear_knot_line)
+        self.appear_form_layout.addWidget(self.appear_enter)
+
+        tab.addTab(ini_wid,'initial chain')
+        tab.addTab(appear_wid,'appear event')
+        self.l0.addWidget(tab)
+
+        self.fin_button=QPushButton('finish')
+        self.l0.addWidget(self.fin_button)
+
+    def set_bool(self,sbool,dbool):
+        self.sbool = sbool
+        self.dbool = dbool
+
+        self.ini_frame = np.nonzero(np.logical_and(self.sbool[0],self.sbool[1]))[0].min()
+        self.d_appear_frame = [np.nonzero(db)[0].min() for db in self.dbool]
+    
+    def set_object_names(self,names:list):
+        self.object_names = names
+        self.key_combo.clear()
+        self.left_combo.clear()
+        for n in self.object_names:
+            self.key_combo.addItem(n)
+            self.left_combo.addItem(n)
+
+    def _emit_init(self):
+        def clean_split(s):
+            if s=='':
+                return []
+            else:
+                return s.split(',')
+        frame = int(self.frame_line.text())
+        chain = clean_split(self.chain_line.text())
+        knots =  clean_split(self.knot_line.text())
+        flying = clean_split(self.flying_line.text())
+        absent = clean_split(self.absent_line.text())
+        self.InitSignal.emit({'frame':frame,'chain':chain,'knots':knots,
+            'flying':flying,'absent':absent})
+    def _emit_appear(self):
+        frame = int(self.frame_line.text())
+        key = self.key_combo.currentText()
+        isfly = self.isfly_check.isChecked()
+        left = self.left_combo.currentText()
+        knot = self.appear_knot_line.text()
+        self.AppearSignal.emit({'frame':frame,'key':key,
+            'isfly':isfly,'left':left,'knot':knot})
+    
+    def finish_signal(self):
+        return self.fin_button.clicked
+
+
+
+
+
+class ChainOperation(Operation):
+    def __init__(self,res,ld):
+        self.res = res
+        self.ld = ld
+
+        self.calc = ChainAssigner()
+        self.wid = ChainWidget()
+
+    def viewer_setting(self, viewerset):
+        self.viewerset = viewerset
+        self.viewerset.generate_viewers({'single':1})
+        self.viewerset.deploy('single')
+
+        self.viewer = self.viewerset.get_viewers()['single'][0]
+        self.viewer.set_loader(self.ld)
+        self.viewer.setting.enable_roi = False
+        self.viewer.setting.show_roi_bgr = False
+        self.viewer.apply_setting()
+
+        self.drawing = self.viewer.get_drawing()
+        self.drawing.vis_off()
+
+        self.ndia = self.res.get_unit('basics').get()['ndia']
+        pos_df = self.res.get_unit('smoothened').get()
+        obj_name = ['l','r'] + ['d'+str(i) for i in range(self.ndia)]
+        posdict = {}
+        knotdict = {}
+        for n in obj_name:
+            posdict[n] = np.stack((pos_df[n+'_x'],pos_df[n+'_y']),axis=1)
+            knotdict[n] = np.full((self.ld.getframenum()),fill_value='',dtype=object)
+        self.posdict = posdict
+        chain = [[] for i in range(self.ld.getframenum())]
+        self.drawing.set_positions(posdict)
+        self.drawing.set_wrap(knotdict,posdict,vis=True)
+        self.drawing.set_string(chain,posdict)
+
+        self.viewer.change_fpos(0)
+
+        self.wid.set_object_names(list(self.posdict.keys()))
+
+    def run(self):
+        dposlist = [self.posdict['d'+str(i)] for i in range(self.ndia)]
+        dposbool = [np.any(arr!=0,axis=1) for arr in dposlist]
+        sposlist = [self.posdict['l'], self.posdict['r']]
+        sposbool = [np.any(arr!=0,axis=1) for arr in sposlist]
+        self.calc.set(dposlist,dposbool,sposlist,sposbool)
+        self.wid.set_bool(sposbool,dposbool)
+
+        self.wid.InitSignal.connect(self._parse_init)
+        self.wid.AppearSignal.connect(self._parse_appear)
+    
+    def _parse_init(self,input_data:dict):
+        self.calc.set_initial_chain(**input_data)
+        self._visualize_data()
+
+    def _parse_appear(self,input_data:dict):
+        if input_data['isfly']:
+            self.calc.appear_fly(frame=input_data['frame'],key=input_data['key'])
+        else:
+            self.calc.appear_land(input_data['frame'],input_data['key'],
+                input_data['left'],input_data['knot'])
+        self._visualize_data()
+        
+    def get_widget(self):
+        return self.wid
+    def post_finish(self):
+        pass
+    def finish_signal(self):
+        return self.wid.finish_signal()
+    
+    def _visualize_data(self):
+        cs_frame, cs_dict, land_df, fly_df, pass_df, knot = self.calc.get()
+        chain = [[] for i in range(self.ld.getframenum())]
+        for f,fnext,cs in zip(cs_frame,cs_frame[1:]+[self.ld.getframenum()],cs_dict):
+            chain[f:fnext] = [cs['chain'] for i in range(f,fnext)]
+        self.drawing.set_string(chain,self.posdict)
+        
+        self.drawing.set_wrap(knot,self.posdict,vis=True)
+
+
+
+
+
+# to write wrap and undo_wrap functions.
